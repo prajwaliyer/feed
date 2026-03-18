@@ -1,0 +1,12 @@
+services:
+  rsshub:
+    image: diygod/rsshub
+    restart: unless-stopped
+    ports:
+      - "1200:1200"
+    environment:
+      - NODE_ENV=production
+      - CACHE_TYPE=memory
+      - CACHE_EXPIRE=300
+      - CACHE_CONTENT_EXPIRE=300
+      - TWITTER_AUTH_TOKEN=${TWITTER_AUTH_TOKEN}
