@@ -71,6 +71,12 @@ export function useFeed(params?: {
     }
   }, [lastFetchData?.lastFetch, mutate]);
 
+  useEffect(() => {
+    const handler = () => mutate();
+    window.addEventListener("feed-star-changed", handler);
+    return () => window.removeEventListener("feed-star-changed", handler);
+  }, [mutate]);
+
   const items = data ? data.flatMap((page) => page.items) : [];
   const isLoadingMore = size > 0 && data && typeof data[size - 1] === "undefined";
   const hasMore = data ? data[data.length - 1]?.nextCursor !== null : false;

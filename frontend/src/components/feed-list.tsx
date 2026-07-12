@@ -62,6 +62,7 @@ export function FeedList({ starred }: FeedListProps) {
       body: JSON.stringify({ isStarred: starred }),
     });
     mutate();
+    window.dispatchEvent(new Event("feed-star-changed"));
   };
 
   const handleSetMultiplier = async (sourceId: number, multiplier: string | null) => {

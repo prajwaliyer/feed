@@ -187,6 +187,7 @@ interface ParsedContent {
   mainText: string;
   mainImages: string[];
   mainVideos: { src: string; poster?: string }[];
+  retweetAuthor: string | null;
   quote: {
     author: string;
     text: string;
@@ -195,8 +196,21 @@ interface ParsedContent {
   } | null;
 }
 
+// Two RSSHub retweet formats: "RT @handle: text" and "RT<en-space>Display Name<br/>text"
+const RETWEET_HANDLE_REGEX = /^RT @(\w+):\s*/;
+const RETWEET_NAME_REGEX = /^RT ([^<]+?)(?:<br\s*\/?>|$)/;
+const RETWEET_TITLE_PREFIX_REGEX = /^RT[  ]@?\S+:?\s*/;
+
 function parseContent(html: string | null): ParsedContent {
-  if (!html) return { mainText: "", mainImages: [], mainVideos: [], quote: null };
+  if (!html) return { mainText: "", mainImages: [], mainVideos: [], retweetAuthor: null, quote: null };
+
+  const handleMatch = html.match(RETWEET_HANDLE_REGEX);
+  const nameMatch = !handleMatch ? html.match(RETWEET_NAME_REGEX) : null;
+  const retweetMatch = handleMatch || nameMatch;
+  const retweetAuthor = handleMatch ? `@${handleMatch[1]}` : nameMatch ? decodeHtmlEntities(nameMatch[1]).trim() : null;
+  if (retweetMatch) {
+    html = html.slice(retweetMatch[0].length);
+  }
 
   const quoteMatch = html.match(/<div class="rsshub-quote">([\s\S]*)<\/div>\s*$/);
 
@@ -224,34 +238,65 @@ function parseContent(html: string | null): ParsedContent {
     mainText: stripHtml(mainHtml),
     mainImages: extractImages(mainHtml),
     mainVideos: extractVideos(mainHtml),
+    retweetAuthor,
     quote,
   };
 }
 
 const DISMISS_THRESHOLD = 150;
 
-function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
-  const imgRef = useRef<HTMLImageElement>(null);
+function ImageLightbox({
+  images,
+  initialIndex,
+  onClose,
+}: {
+  images: string[];
+  initialIndex: number;
+  onClose: () => void;
+}) {
+  const [currentIndex, setCurrentIndex] = useState(initialIndex);
+  const stripRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef({
     scale: 1, x: 0, y: 0,
     startDist: 0, startScale: 1, startX: 0, startY: 0,
     panStartX: 0, panStartY: 0,
-    isPanning: false, isDismissing: false,
+    isPanning: false, isDismissing: false, isSwiping: false,
     dismissStartY: 0, dismissY: 0,
+    swipeStartX: 0, swipeX: 0,
     lastTapTime: 0, lastTapX: 0, lastTapY: 0,
     isAnimating: false,
   });
 
+  const hasMultiple = images.length > 1;
+  const IMAGE_GAP = 20;
+  const currentIndexRef = useRef(currentIndex);
+  currentIndexRef.current = currentIndex;
+
+  const slideOffset = useCallback((index: number) => {
+    return -index * (window.innerWidth + IMAGE_GAP);
+  }, [IMAGE_GAP]);
+
+  const getActiveImg = useCallback((): HTMLImageElement | null => {
+    return stripRef.current?.querySelector(`[data-index="${currentIndexRef.current}"]`) as HTMLImageElement | null;
+  }, []);
+
+  const applyStripOffset = useCallback((extra = 0) => {
+    const strip = stripRef.current;
+    if (strip) {
+      strip.style.transform = `translateX(${slideOffset(currentIndexRef.current) + extra}px)`;
+    }
+  }, [slideOffset]);
+
   const applyTransform = useCallback(() => {
     const s = stateRef.current;
-    const img = imgRef.current;
+    const img = getActiveImg();
     if (img) img.style.transform = `translate(${s.x}px, ${s.y}px) scale(${s.scale})`;
-  }, []);
+  }, [getActiveImg]);
 
   const animateZoom = useCallback((toScale: number, toX: number, toY: number) => {
     const s = stateRef.current;
-    const img = imgRef.current;
+    const img = getActiveImg();
     if (!img || s.isAnimating) return;
     s.isAnimating = true;
     img.style.transition = "transform 0.3s cubic-bezier(0.2, 0, 0.2, 1)";
@@ -265,20 +310,48 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
       img.removeEventListener("transitionend", onEnd);
     };
     img.addEventListener("transitionend", onEnd);
-  }, []);
+  }, [getActiveImg]);
 
   const applyDismiss = useCallback(() => {
     const s = stateRef.current;
-    const img = imgRef.current;
+    const strip = stripRef.current;
     const backdrop = backdropRef.current;
     const opacity = Math.max(0, 1 - Math.abs(s.dismissY) / (DISMISS_THRESHOLD * 2));
-    if (img) img.style.transform = `translateY(${s.dismissY}px) scale(${s.scale})`;
+    if (strip) {
+      strip.style.transform = `translateX(${slideOffset(currentIndexRef.current)}px) translateY(${s.dismissY}px)`;
+    }
     if (backdrop) backdrop.style.opacity = String(opacity);
   }, []);
+
+  const goTo = useCallback((index: number) => {
+    const strip = stripRef.current;
+    if (!strip) return;
+    const s = stateRef.current;
+    // Reset zoom on current image before navigating
+    const currentImg = getActiveImg();
+    if (currentImg) {
+      currentImg.style.transition = "";
+      currentImg.style.transform = "";
+    }
+    s.scale = 1;
+    s.x = 0;
+    s.y = 0;
+    s.swipeX = 0;
+    strip.style.transition = "transform 0.25s ease-out";
+    strip.style.transform = `translateX(${slideOffset(index)}px)`;
+    const onEnd = () => {
+      strip.style.transition = "";
+      strip.removeEventListener("transitionend", onEnd);
+    };
+    strip.addEventListener("transitionend", onEnd);
+    setCurrentIndex(index);
+  }, [getActiveImg]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft" && currentIndexRef.current > 0) goTo(currentIndexRef.current - 1);
+      if (e.key === "ArrowRight" && currentIndexRef.current < images.length - 1) goTo(currentIndexRef.current + 1);
     };
     document.body.style.overflow = "hidden";
     document.addEventListener("keydown", handleKey);
@@ -286,7 +359,9 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
       document.body.style.overflow = "";
       document.removeEventListener("keydown", handleKey);
     };
-  }, [onClose]);
+  }, [onClose, images.length, goTo]);
+
+  const SWIPE_THRESHOLD = 80;
 
   const getDistance = (t1: React.Touch, t2: React.Touch) =>
     Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
@@ -301,6 +376,7 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
     const s = stateRef.current;
     if (e.touches.length === 2) {
       s.isDismissing = false;
+      s.isSwiping = false;
       s.startDist = getDistance(e.touches[0], e.touches[1]);
       s.startScale = s.scale;
       const mid = getMidpoint(e.touches[0], e.touches[1]);
@@ -317,10 +393,14 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
         s.startY = s.y;
         s.isPanning = true;
         s.isDismissing = false;
+        s.isSwiping = false;
       } else {
+        s.swipeStartX = e.touches[0].clientX;
         s.dismissStartY = e.touches[0].clientY;
+        s.swipeX = 0;
         s.dismissY = 0;
-        s.isDismissing = true;
+        s.isDismissing = false;
+        s.isSwiping = false;
         s.isPanning = false;
       }
     }
@@ -342,6 +422,20 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
         s.x = s.startX + (e.touches[0].clientX - s.panStartX);
         s.y = s.startY + (e.touches[0].clientY - s.panStartY);
         applyTransform();
+      } else if (!s.isDismissing && !s.isSwiping && s.scale <= 1) {
+        const dx = e.touches[0].clientX - s.swipeStartX;
+        const dy = e.touches[0].clientY - s.dismissStartY;
+        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+          if (hasMultiple && Math.abs(dx) > Math.abs(dy)) {
+            s.isSwiping = true;
+          } else {
+            s.isDismissing = true;
+          }
+        }
+      }
+      if (s.isSwiping) {
+        s.swipeX = e.touches[0].clientX - s.swipeStartX;
+        applyStripOffset(s.swipeX);
       } else if (s.isDismissing) {
         s.dismissY = e.touches[0].clientY - s.dismissStartY;
         applyDismiss();
@@ -353,8 +447,29 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
     e.stopPropagation();
     const s = stateRef.current;
 
+    if (s.isSwiping) {
+      s.isSwiping = false;
+      if (Math.abs(s.swipeX) > SWIPE_THRESHOLD) {
+        if (s.swipeX < 0 && currentIndex < images.length - 1) {
+          goTo(currentIndex + 1);
+          return;
+        } else if (s.swipeX > 0 && currentIndex > 0) {
+          goTo(currentIndex - 1);
+          return;
+        }
+      }
+      // Snap back
+      s.swipeX = 0;
+      const strip = stripRef.current;
+      if (strip) {
+        strip.style.transition = "transform 0.2s ease";
+        applyStripOffset(0);
+        setTimeout(() => { if (strip) strip.style.transition = ""; }, 200);
+      }
+      return;
+    }
+
     if (s.isDismissing) {
-      // Check for double-tap before handling dismiss
       const movedDuringDismiss = Math.abs(s.dismissY) > 10;
       if (!movedDuringDismiss && e.touches.length === 0 && e.changedTouches.length === 1) {
         const now = Date.now();
@@ -366,17 +481,13 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
         if (dt < 300 && dx < 30 && dy < 30) {
           s.lastTapTime = 0;
           s.isDismissing = false;
-          // Double-tap: zoom to 2x centered on tap point
-          const img = imgRef.current;
+          const img = getActiveImg();
           if (img) {
             const rect = img.getBoundingClientRect();
             const cx = rect.left + rect.width / 2;
             const cy = rect.top + rect.height / 2;
-            const tapX = touch.clientX;
-            const tapY = touch.clientY;
-            // Offset so the tapped point stays in place after 2x zoom
-            const toX = (cx - tapX) * 2;
-            const toY = (cy - tapY) * 2;
+            const toX = (cx - touch.clientX) * 2;
+            const toY = (cy - touch.clientY) * 2;
             animateZoom(3, toX, toY);
           }
           return;
@@ -392,12 +503,12 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
       }
       s.dismissY = 0;
       s.isDismissing = false;
-      const img = imgRef.current;
+      const strip = stripRef.current;
       const backdrop = backdropRef.current;
-      if (img) {
-        img.style.transition = "transform 0.2s ease";
-        img.style.transform = "translateY(0) scale(1)";
-        setTimeout(() => { if (img) img.style.transition = ""; }, 200);
+      if (strip) {
+        strip.style.transition = "transform 0.2s ease";
+        applyStripOffset(0);
+        setTimeout(() => { if (strip) strip.style.transition = ""; }, 200);
       }
       if (backdrop) {
         backdrop.style.transition = "opacity 0.2s ease";
@@ -429,16 +540,44 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
       }
     }
 
+    // Double-tap to zoom in (no gesture detected — tap without movement)
+    if (!s.isPanning && !s.isDismissing && !s.isSwiping && s.scale <= 1 &&
+        e.touches.length === 0 && e.changedTouches.length === 1) {
+      const touch = e.changedTouches[0];
+      const now = Date.now();
+      const dt = now - s.lastTapTime;
+      const dx = Math.abs(touch.clientX - s.lastTapX);
+      const dy = Math.abs(touch.clientY - s.lastTapY);
+
+      if (dt < 300 && dx < 30 && dy < 30) {
+        s.lastTapTime = 0;
+        const img = getActiveImg();
+        if (img) {
+          const rect = img.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const toX = (cx - touch.clientX) * 2;
+          const toY = (cy - touch.clientY) * 2;
+          animateZoom(3, toX, toY);
+        }
+        return;
+      }
+      s.lastTapTime = now;
+      s.lastTapX = touch.clientX;
+      s.lastTapY = touch.clientY;
+    }
+
     s.isPanning = false;
     if (s.scale <= 1) {
       s.scale = 1;
       s.x = 0;
       s.y = 0;
-      applyTransform();
+      const img = getActiveImg();
+      if (img) img.style.transform = "";
     }
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-[60] touch-none">
       <div ref={backdropRef} className="absolute inset-0 bg-black" />
       <button
@@ -451,21 +590,54 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
           <line x1="6" y1="6" x2="18" y2="18" />
         </svg>
       </button>
+      {hasMultiple && (
+        <div
+          className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5"
+          style={{ marginTop: "env(safe-area-inset-top)" }}
+        >
+          {images.map((_, i) => (
+            <div
+              key={i}
+              className={`h-1.5 w-1.5 rounded-full transition-colors ${
+                i === currentIndex ? "bg-white" : "bg-white/40"
+              }`}
+            />
+          ))}
+        </div>
+      )}
       <div
-        className="relative flex h-full w-full items-center justify-center"
+        className="relative h-full w-full overflow-hidden"
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       >
-        <img
-          ref={imgRef}
-          src={src}
-          alt=""
-          className="max-h-full max-w-full object-contain"
-          draggable={false}
-        />
+        <div
+          ref={stripRef}
+          className="flex h-full"
+          style={{
+            gap: `${IMAGE_GAP}px`,
+            transform: `translateX(${-(initialIndex * (window.innerWidth + IMAGE_GAP))}px)`,
+          }}
+        >
+          {images.map((src, i) => (
+            <div
+              key={i}
+              className="flex h-full items-center justify-center shrink-0"
+              style={{ width: "100vw" }}
+            >
+              <img
+                data-index={i}
+                src={src}
+                alt=""
+                className="max-h-full max-w-full object-contain"
+                draggable={false}
+              />
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -543,25 +715,29 @@ function SourceSettingsDialog({
 }
 
 function MediaGrid({ images, videos }: { images: string[]; videos: { src: string; poster?: string }[] }) {
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-  const closeLightbox = useCallback(() => setLightboxSrc(null), []);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const closeLightbox = useCallback(() => setLightboxIndex(null), []);
 
   if (images.length === 0 && videos.length === 0) return null;
 
+  const proxiedImages = images.slice(0, 4).map((src) => proxyUrl(src));
+
   return (
     <>
-      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />}
+      {lightboxIndex !== null && (
+        <ImageLightbox images={proxiedImages} initialIndex={lightboxIndex} onClose={closeLightbox} />
+      )}
       <div className="mt-2 space-y-1">
         {images.length > 0 && (
           <div className={`grid gap-1 ${images.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
-            {images.slice(0, 4).map((src, i) => (
+            {proxiedImages.map((src, i) => (
               <LoadingImage
                 key={i}
-                src={proxyUrl(src)}
+                src={src}
                 alt=""
                 className="w-full rounded-lg border border-border object-contain cursor-pointer"
                 loading="lazy"
-                onClick={() => setLightboxSrc(proxyUrl(src))}
+                onClick={() => setLightboxIndex(i)}
               />
             ))}
           </div>
@@ -591,8 +767,8 @@ interface FeedItemCardProps {
 
 export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCardProps) {
   const [showSourceSettings, setShowSourceSettings] = useState(false);
-  const { mainText, mainImages, mainVideos, quote } = parseContent(item.content);
-  const displayText = mainText || item.title || "";
+  const { mainText, mainImages, mainVideos, retweetAuthor, quote } = parseContent(item.content);
+  const displayText = mainText || item.title?.replace(RETWEET_TITLE_PREFIX_REGEX, "") || "";
 
   return (
     <article className="border-b border-border px-4 py-3">
@@ -625,6 +801,19 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
 
         {/* Content */}
         <div className="min-w-0 flex-1">
+          {/* Repost indicator */}
+          {retweetAuthor && (
+            <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path d="m2 9 3-3 3 3" />
+                <path d="M13 18H7a2 2 0 0 1-2-2V6" />
+                <path d="m22 15-3 3-3-3" />
+                <path d="M11 6h6a2 2 0 0 1 2 2v10" />
+              </svg>
+              <span className="truncate">{item.author || item.sourceName} reposted</span>
+            </div>
+          )}
+
           {/* Header */}
           <div className="flex items-center gap-1.5">
             <span className="truncate font-semibold text-sm">
@@ -639,34 +828,52 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
             </span>
           </div>
 
-          {/* Main text */}
-          {displayText && (
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">
-              {linkifyText(displayText)}
-            </p>
-          )}
-
-          {/* Link previews */}
-          {extractUrls(displayText).slice(0, 1).map((url, i) => (
-            <LinkPreview key={i} url={url} />
-          ))}
-
-          {/* Main media */}
-          <MediaGrid images={mainImages} videos={mainVideos} />
-
-          {/* Quote tweet */}
-          {quote && (
-            <div className="mt-2 rounded-lg border border-border p-3">
-              {quote.author && (
-                <p className="text-xs font-semibold text-foreground">{quote.author}</p>
-              )}
-              {quote.text && (
-                <p className="mt-0.5 whitespace-pre-wrap break-words text-sm text-muted-foreground leading-relaxed">
-                  {quote.text}
+          {retweetAuthor ? (
+            /* Reposted content, nested like a real retweet card */
+            <div className="mt-1.5 rounded-lg border border-border p-3">
+              <p className="text-xs font-semibold text-foreground">{retweetAuthor}</p>
+              {displayText && (
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                  {linkifyText(displayText)}
                 </p>
               )}
-              <MediaGrid images={quote.images} videos={quote.videos} />
+              {mainImages.length === 0 && extractUrls(displayText).slice(0, 1).map((url, i) => (
+                <LinkPreview key={i} url={url} />
+              ))}
+              <MediaGrid images={mainImages} videos={mainVideos} />
             </div>
+          ) : (
+            <>
+              {/* Main text */}
+              {displayText && (
+                <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                  {linkifyText(displayText)}
+                </p>
+              )}
+
+              {/* Link previews (hide when post has images) */}
+              {mainImages.length === 0 && extractUrls(displayText).slice(0, 1).map((url, i) => (
+                <LinkPreview key={i} url={url} />
+              ))}
+
+              {/* Main media */}
+              <MediaGrid images={mainImages} videos={mainVideos} />
+
+              {/* Quote tweet */}
+              {quote && (
+                <div className="mt-2 rounded-lg border border-border p-3">
+                  {quote.author && (
+                    <p className="text-xs font-semibold text-foreground">{quote.author}</p>
+                  )}
+                  {quote.text && (
+                    <p className="mt-0.5 whitespace-pre-wrap break-words text-sm text-muted-foreground leading-relaxed">
+                      {quote.text}
+                    </p>
+                  )}
+                  <MediaGrid images={quote.images} videos={quote.videos} />
+                </div>
+              )}
+            </>
           )}
 
           {/* Actions */}
