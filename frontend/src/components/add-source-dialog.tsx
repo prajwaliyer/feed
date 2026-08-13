@@ -122,11 +122,6 @@ export function AddSourceDialog({ onAdded, defaultType = "twitter_user" }: AddSo
                     autoFocus
                     className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   />
-                  {sourceType === "instagram_story" && (
-                    <p className="text-xs text-muted-foreground">
-                      Your fetch account must already follow this account for stories to show up.
-                    </p>
-                  )}
                 </div>
                 <div className="space-y-2">
                   <label htmlFor="multiplier" className="text-sm font-medium">
