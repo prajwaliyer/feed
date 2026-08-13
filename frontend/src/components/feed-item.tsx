@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { SiInstagram, SiX } from "react-icons/si";
+import { SiInstagram, SiRss, SiX } from "react-icons/si";
 import type { FeedItem } from "@/hooks/use-feed";
 import { Avatar } from "./avatar";
 
@@ -94,6 +94,30 @@ function LinkPreview({ url }: { url: string }) {
   );
 }
 
+function RssCard({ title, imageUrl, url }: { title: string | null; imageUrl: string | null; url: string | null }) {
+  return (
+    <a
+      href={url ?? undefined}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="mt-1.5 flex items-center gap-3 rounded-lg border border-border p-2 hover:bg-muted transition-colors"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {imageUrl && (
+        <LoadingImage
+          src={proxyUrl(imageUrl)}
+          alt=""
+          className="h-16 w-16 shrink-0 rounded-md object-cover"
+          loading="lazy"
+        />
+      )}
+      <p className="min-w-0 flex-1 text-sm font-medium leading-snug line-clamp-3">
+        {title}
+      </p>
+    </a>
+  );
+}
+
 function timeAgo(dateStr: string): string {
   const now = Date.now();
   const then = new Date(dateStr).getTime();
@@ -172,6 +196,9 @@ function SourcePlatformBadge({ sourceType }: { sourceType: string | null }) {
   }
   if (sourceType?.startsWith("instagram")) {
     return <SiInstagram className="h-2.5 w-2.5 text-muted-foreground" title="Instagram" />;
+  }
+  if (sourceType === "rss") {
+    return <SiRss className="h-2.5 w-2.5 text-muted-foreground" title="RSS" />;
   }
   return (
     <svg className="h-2.5 w-2.5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -843,7 +870,9 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
             </div>
           )}
 
-          {retweetAuthor ? (
+          {item.sourceType === "rss" ? (
+            <RssCard title={item.title} imageUrl={item.imageUrl} url={item.url} />
+          ) : retweetAuthor ? (
             /* Reposted content, nested like a real retweet card */
             <div className="mt-1.5 rounded-lg border border-border p-3">
               <p className="text-xs font-semibold text-foreground">{retweetAuthor}</p>
@@ -893,21 +922,25 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
 
           {/* Actions */}
           <div className="mt-2 flex items-center gap-4">
-            {/* Likes */}
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z" />
-              </svg>
-              {formatCount(item.likeCount)}
-            </span>
+            {item.sourceType !== "rss" && (
+              <>
+                {/* Likes */}
+                <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z" />
+                  </svg>
+                  {formatCount(item.likeCount)}
+                </span>
 
-            {/* Replies */}
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-              </svg>
-              {formatCount(item.replyCount)}
-            </span>
+                {/* Replies */}
+                <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                  </svg>
+                  {formatCount(item.replyCount)}
+                </span>
+              </>
+            )}
 
             {/* Share */}
             {item.url && (

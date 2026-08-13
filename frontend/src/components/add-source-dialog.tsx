@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
 
-type SourceType = "twitter_user" | "instagram_story";
+type SourceType = "twitter_user" | "instagram_story" | "rss";
 
 interface AddSourceDialogProps {
   onAdded: () => void;
   defaultType?: SourceType;
 }
 
-const HANDLE_RULES: Record<SourceType, { label: string; placeholder: string; pattern: RegExp; error: string }> = {
+const HANDLE_RULES: Record<"twitter_user" | "instagram_story", { label: string; placeholder: string; pattern: RegExp; error: string }> = {
   twitter_user: {
     label: "Twitter Username",
     placeholder: "elonmusk",
@@ -23,27 +23,63 @@ const HANDLE_RULES: Record<SourceType, { label: string; placeholder: string; pat
   },
 };
 
+const TABS: { type: SourceType; label: string }[] = [
+  { type: "twitter_user", label: "Twitter" },
+  { type: "instagram_story", label: "Instagram" },
+  { type: "rss", label: "RSS" },
+];
+
 export function AddSourceDialog({ onAdded, defaultType = "twitter_user" }: AddSourceDialogProps) {
   const [open, setOpen] = useState(false);
   const [sourceType, setSourceType] = useState<SourceType>(defaultType);
   const [handle, setHandle] = useState("");
+  const [feedUrl, setFeedUrl] = useState("");
+  const [feedName, setFeedName] = useState("");
   const [multiplier, setMultiplier] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const rules = HANDLE_RULES[sourceType];
+  const resetFields = () => {
+    setHandle("");
+    setFeedUrl("");
+    setFeedName("");
+    setMultiplier("");
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const clean = handle.trim().replace(/^@/, "");
 
-    if (!clean) {
-      setError(`Please enter ${sourceType === "twitter_user" ? "a Twitter username" : "an Instagram username"}`);
-      return;
+    let payload: Record<string, unknown>;
+
+    if (sourceType === "rss") {
+      const url = feedUrl.trim();
+      if (!url) {
+        setError("Please enter a feed URL");
+        return;
+      }
+      try {
+        new URL(url);
+      } catch {
+        setError("Invalid feed URL");
+        return;
+      }
+      payload = { type: sourceType, url, ...(feedName.trim() ? { name: feedName.trim() } : {}) };
+    } else {
+      const rules = HANDLE_RULES[sourceType];
+      const clean = handle.trim().replace(/^@/, "");
+      if (!clean) {
+        setError(`Please enter ${sourceType === "twitter_user" ? "a Twitter username" : "an Instagram username"}`);
+        return;
+      }
+      if (!rules.pattern.test(clean)) {
+        setError(rules.error);
+        return;
+      }
+      payload = { handle: clean, type: sourceType };
     }
-    if (!rules.pattern.test(clean)) {
-      setError(rules.error);
-      return;
+
+    if (multiplier && !isNaN(parseFloat(multiplier))) {
+      payload.customMultiplier = parseFloat(multiplier);
     }
 
     setLoading(true);
@@ -53,11 +89,7 @@ export function AddSourceDialog({ onAdded, defaultType = "twitter_user" }: AddSo
       const res = await fetch("/api/sources", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          handle: clean,
-          type: sourceType,
-          ...(multiplier && !isNaN(parseFloat(multiplier)) ? { customMultiplier: parseFloat(multiplier) } : {}),
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
@@ -65,8 +97,7 @@ export function AddSourceDialog({ onAdded, defaultType = "twitter_user" }: AddSo
         throw new Error(data.error || "Failed to add source");
       }
 
-      setHandle("");
-      setMultiplier("");
+      resetFields();
       setOpen(false);
       onAdded();
     } catch (err) {
@@ -94,35 +125,65 @@ export function AddSourceDialog({ onAdded, defaultType = "twitter_user" }: AddSo
             <div className="w-full max-w-md rounded-lg border border-border bg-background p-6 shadow-lg" onClick={(e) => e.stopPropagation()}>
               <h3 className="text-lg font-semibold">Add Account</h3>
               <div className="mt-4 flex gap-1.5">
-                {(["twitter_user", "instagram_story"] as const).map((t) => (
+                {TABS.map(({ type, label }) => (
                   <button
-                    key={t}
+                    key={type}
                     type="button"
-                    onClick={() => { setSourceType(t); setError(""); }}
+                    onClick={() => { setSourceType(type); setError(""); }}
                     className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                      sourceType === t
+                      sourceType === type
                         ? "bg-primary text-primary-foreground"
                         : "bg-muted text-muted-foreground"
                     }`}
                   >
-                    {t === "twitter_user" ? "Twitter" : "Instagram"}
+                    {label}
                   </button>
                 ))}
               </div>
               <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-                <div className="space-y-2">
-                  <label htmlFor="handle" className="text-sm font-medium">
-                    {rules.label}
-                  </label>
-                  <input
-                    id="handle"
-                    placeholder={rules.placeholder}
-                    value={handle}
-                    onChange={(e) => setHandle(e.target.value)}
-                    autoFocus
-                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  />
-                </div>
+                {sourceType === "rss" ? (
+                  <>
+                    <div className="space-y-2">
+                      <label htmlFor="feedUrl" className="text-sm font-medium">
+                        Feed URL
+                      </label>
+                      <input
+                        id="feedUrl"
+                        placeholder="https://www.astralcodexten.com/feed"
+                        value={feedUrl}
+                        onChange={(e) => setFeedUrl(e.target.value)}
+                        autoFocus
+                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label htmlFor="feedName" className="text-sm font-medium">
+                        Name <span className="text-muted-foreground font-normal">(optional, defaults to feed title)</span>
+                      </label>
+                      <input
+                        id="feedName"
+                        placeholder="Astral Codex Ten"
+                        value={feedName}
+                        onChange={(e) => setFeedName(e.target.value)}
+                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-2">
+                    <label htmlFor="handle" className="text-sm font-medium">
+                      {HANDLE_RULES[sourceType].label}
+                    </label>
+                    <input
+                      id="handle"
+                      placeholder={HANDLE_RULES[sourceType].placeholder}
+                      value={handle}
+                      onChange={(e) => setHandle(e.target.value)}
+                      autoFocus
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    />
+                  </div>
+                )}
                 <div className="space-y-2">
                   <label htmlFor="multiplier" className="text-sm font-medium">
                     Boost Multiplier <span className="text-muted-foreground font-normal">(optional, 0.1–10)</span>

@@ -3,7 +3,9 @@ import re
 import statistics
 import time
 from datetime import timedelta
+from urllib.parse import urlparse
 
+import feedparser
 import requests as http_requests
 from django.conf import settings
 from django.http import HttpResponse, JsonResponse
@@ -73,6 +75,11 @@ def items_list(request):
             # Instagram posts aren't ranked by engagement - show all of them
             # (already capped to the last 2 days by fetcher.POST_RETENTION).
             if item.guid.startswith("instagram_post_"):
+                return True
+            # RSS items never get like/reply counts (those only come from the
+            # Twitter syndication API), so they'd always score 0 and vanish
+            # from "For You" - show them unfiltered instead.
+            if item.source.type == "rss":
                 return True
 
             median = medians.get(item.source_id, 1)
@@ -267,6 +274,18 @@ def _build_rsshub_url(handle):
     return f"{settings.RSSHUB_BASE_URL}/twitter/user/{clean}"
 
 
+def _fetch_rss_metadata(url):
+    try:
+        feed = feedparser.parse(url)
+        title = feed.feed.get("title")
+        link = feed.feed.get("link") or url
+        domain = urlparse(link).netloc
+        icon = f"https://www.google.com/s2/favicons?domain={domain}&sz=128" if domain else None
+        return title, icon
+    except Exception:
+        return None, None
+
+
 @csrf_exempt
 def sources_view(request):
     if request.method == "GET":
@@ -275,13 +294,30 @@ def sources_view(request):
 
     if request.method == "POST":
         body = json.loads(request.body)
+        source_type = body.get("type", "twitter_user")
+        custom_multiplier = body.get("customMultiplier")
+
+        if source_type == "rss":
+            feed_url = body.get("url", "").strip()
+            if not feed_url:
+                return JsonResponse({"error": "url is required"}, status=400)
+
+            title, icon = _fetch_rss_metadata(feed_url)
+            name = body.get("name") or title or feed_url
+            source = Source.objects.create(
+                type=source_type,
+                name=name,
+                url=feed_url,
+                icon_url=icon,
+                custom_multiplier=str(custom_multiplier) if custom_multiplier is not None else None,
+            )
+            return JsonResponse(source.to_dict(), status=201)
+
         handle = body.get("handle", "").lstrip("@")
         if not handle:
             return JsonResponse({"error": "handle is required"}, status=400)
 
-        source_type = body.get("type", "twitter_user")
         name = body.get("name") or handle
-        custom_multiplier = body.get("customMultiplier")
 
         if source_type == "instagram_story":
             source = Source.objects.create(

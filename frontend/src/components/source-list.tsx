@@ -17,7 +17,13 @@ interface Source {
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-type TopTab = "twitter_user" | "instagram_story";
+type TopTab = "twitter_user" | "instagram_story" | "rss";
+
+const TAB_LABELS: Record<TopTab, string> = {
+  twitter_user: "Twitter",
+  instagram_story: "Instagram",
+  rss: "RSS",
+};
 
 function OverflowMenu({
   source,
@@ -145,8 +151,10 @@ export function SourceList() {
 
   const twitterSources = sources?.filter((s) => s.type === "twitter_user") ?? [];
   const instagramSources = sources?.filter((s) => s.type === "instagram_story") ?? [];
+  const rssSources = sources?.filter((s) => s.type === "rss") ?? [];
 
-  const byTab = topTab === "instagram_story" ? instagramSources : twitterSources;
+  const byTab =
+    topTab === "instagram_story" ? instagramSources : topTab === "rss" ? rssSources : twitterSources;
 
   const sorted = [...byTab].sort((a, b) => {
     const aMultiplier = a.customMultiplier ? parseFloat(a.customMultiplier) : 1;
@@ -178,7 +186,7 @@ export function SourceList() {
         </div>
 
         <div className="flex gap-1.5 px-4 pb-2">
-          {(["twitter_user", "instagram_story"] as const).map((tab) => (
+          {(["twitter_user", "instagram_story", "rss"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setTopTab(tab)}
@@ -188,7 +196,7 @@ export function SourceList() {
                   : "bg-muted text-muted-foreground"
               }`}
             >
-              {tab === "twitter_user" ? "Twitter" : "Instagram"}
+              {TAB_LABELS[tab]}
             </button>
           ))}
         </div>
@@ -201,12 +209,8 @@ export function SourceList() {
         </div>
       ) : filtered.length === 0 ? (
         <div className="px-4 py-20 text-center text-muted-foreground">
-          <p className="text-lg font-medium">
-            {topTab === "instagram_story" ? "No Instagram accounts yet" : "No Twitter accounts yet"}
-          </p>
-          <p className="mt-1 text-sm">
-            {topTab === "instagram_story" ? "Add an Instagram account to get started" : "Add a Twitter account to get started"}
-          </p>
+          <p className="text-lg font-medium">No {TAB_LABELS[topTab]} sources yet</p>
+          <p className="mt-1 text-sm">Add a {TAB_LABELS[topTab]} source to get started</p>
         </div>
       ) : (
         <ul>
@@ -223,7 +227,9 @@ export function SourceList() {
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <p className="font-medium text-sm truncate">@{source.name}</p>
+                  <p className="font-medium text-sm truncate">
+                    {source.type === "rss" ? source.name : `@${source.name}`}
+                  </p>
                   {source.customMultiplier && (
                     <span className={`shrink-0 text-[10px] ${parseFloat(source.customMultiplier) > 1 ? "text-green-500" : parseFloat(source.customMultiplier) < 1 ? "text-red-400" : "text-muted-foreground"}`}>
                       {source.customMultiplier}x
