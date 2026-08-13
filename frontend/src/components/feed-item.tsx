@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { SiInstagram, SiX } from "react-icons/si";
 import type { FeedItem } from "@/hooks/use-feed";
 import { Avatar } from "./avatar";
 
@@ -167,42 +168,18 @@ function proxyUrl(url: string): string {
 
 function SourcePlatformBadge({ sourceType }: { sourceType: string | null }) {
   if (sourceType?.startsWith("twitter")) {
-    return (
-      <span
-        className="flex h-4 w-4 items-center justify-center rounded-full bg-black"
-        title="Twitter"
-      >
-        <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="white">
-          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-        </svg>
-      </span>
-    );
+    return <SiX className="h-2.5 w-2.5 text-muted-foreground" title="Twitter" />;
   }
   if (sourceType?.startsWith("instagram")) {
-    return (
-      <span
-        className="flex h-4 w-4 items-center justify-center rounded-full bg-gradient-to-tr from-yellow-400 via-pink-500 to-purple-600"
-        title="Instagram"
-      >
-        <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={2}>
-          <rect x="3" y="3" width="18" height="18" rx="5" />
-          <circle cx="12" cy="12" r="4" />
-          <circle cx="17.5" cy="6.5" r="0.75" fill="white" stroke="none" />
-        </svg>
-      </span>
-    );
+    return <SiInstagram className="h-2.5 w-2.5 text-muted-foreground" title="Instagram" />;
   }
   return (
-    <span
-      className="flex h-4 w-4 items-center justify-center rounded-full bg-muted-foreground"
-      title="Other"
-    >
-      <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={2}>
-        <circle cx="12" cy="12" r="10" />
-        <line x1="2" y1="12" x2="22" y2="12" />
-        <path d="M12 2a15.3 15.3 0 0 1 0 20 15.3 15.3 0 0 1 0-20z" />
-      </svg>
-    </span>
+    <svg className="h-2.5 w-2.5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <title>Other</title>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <path d="M12 2a15.3 15.3 0 0 1 0 20 15.3 15.3 0 0 1 0-20z" />
+    </svg>
   );
 }
 
@@ -842,15 +819,14 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
             <span className="truncate font-semibold text-sm">
               {item.author || item.sourceName}
             </span>
-            <span className="shrink-0 text-xs text-muted-foreground">
+            <span className="shrink-0 flex items-center gap-1 text-xs text-muted-foreground">
               @{item.sourceName}
+              <span className="text-base text-muted-foreground">·</span>
+              <SourcePlatformBadge sourceType={item.sourceType} />
             </span>
             <span className="text-muted-foreground">·</span>
             <span className="shrink-0 text-xs text-muted-foreground">
               {item.publishedAt ? timeAgo(item.publishedAt) : ""}
-            </span>
-            <span className="ml-auto shrink-0">
-              <SourcePlatformBadge sourceType={item.sourceType} />
             </span>
           </div>
 

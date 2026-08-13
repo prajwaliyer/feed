@@ -1,18 +1,19 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
 
+type SourceType = "twitter_user" | "instagram_story";
+
 interface AddSourceDialogProps {
   onAdded: () => void;
+  defaultType?: SourceType;
 }
-
-type SourceType = "twitter_user" | "instagram_story";
 
 const HANDLE_RULES: Record<SourceType, { label: string; placeholder: string; pattern: RegExp; error: string }> = {
   twitter_user: {
-    label: "Twitter Handle",
-    placeholder: "@elonmusk",
+    label: "Twitter Username",
+    placeholder: "elonmusk",
     pattern: /^[a-zA-Z0-9_]{1,15}$/,
-    error: "Invalid Twitter handle",
+    error: "Invalid Twitter username",
   },
   instagram_story: {
     label: "Instagram Username",
@@ -22,9 +23,9 @@ const HANDLE_RULES: Record<SourceType, { label: string; placeholder: string; pat
   },
 };
 
-export function AddSourceDialog({ onAdded }: AddSourceDialogProps) {
+export function AddSourceDialog({ onAdded, defaultType = "twitter_user" }: AddSourceDialogProps) {
   const [open, setOpen] = useState(false);
-  const [sourceType, setSourceType] = useState<SourceType>("twitter_user");
+  const [sourceType, setSourceType] = useState<SourceType>(defaultType);
   const [handle, setHandle] = useState("");
   const [multiplier, setMultiplier] = useState("");
   const [loading, setLoading] = useState(false);
@@ -37,7 +38,7 @@ export function AddSourceDialog({ onAdded }: AddSourceDialogProps) {
     const clean = handle.trim().replace(/^@/, "");
 
     if (!clean) {
-      setError(`Please enter ${sourceType === "twitter_user" ? "a Twitter handle" : "an Instagram username"}`);
+      setError(`Please enter ${sourceType === "twitter_user" ? "a Twitter username" : "an Instagram username"}`);
       return;
     }
     if (!rules.pattern.test(clean)) {
@@ -78,7 +79,11 @@ export function AddSourceDialog({ onAdded }: AddSourceDialogProps) {
   return (
     <>
       <button
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setSourceType(defaultType);
+          setError("");
+          setOpen(true);
+        }}
         className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground shadow-xs transition-all hover:bg-primary/90"
       >
         Add Account
@@ -100,7 +105,7 @@ export function AddSourceDialog({ onAdded }: AddSourceDialogProps) {
                         : "bg-muted text-muted-foreground"
                     }`}
                   >
-                    {t === "twitter_user" ? "Twitter" : "Instagram Story"}
+                    {t === "twitter_user" ? "Twitter" : "Instagram"}
                   </button>
                 ))}
               </div>

@@ -458,6 +458,17 @@ def _host_allowed(hostname):
 _proxy_fail_cache = {}
 PROXY_FAIL_TTL = 300  # seconds
 
+# unavatar.io rate-limits aggressively, and every avatar <img> across every
+# open feed re-fetches it on every load - a handful of sources hitting the
+# limit at once was enough to make most avatars fall back to the letter
+# placeholder. Avatars barely change, so cache successful responses for
+# days rather than re-hitting unavatar.io per view. Scoped to unavatar.io
+# only (not twimg.com/cdninstagram.com) since tweet/story media is far
+# more numerous and shouldn't be held in memory indefinitely.
+_avatar_cache = {}
+AVATAR_CACHE_TTL = 60 * 60 * 24 * 3  # 3 days
+AVATAR_CACHE_HOSTS = {"unavatar.io"}
+
 
 @require_GET
 def proxy(request):
@@ -474,6 +485,18 @@ def proxy(request):
     if not _host_allowed(parsed.hostname):
         return JsonResponse({"error": "host not allowed"}, status=403)
 
+    range_header = request.META.get("HTTP_RANGE")
+    cacheable = parsed.hostname in AVATAR_CACHE_HOSTS and not range_header
+
+    if cacheable:
+        cached = _avatar_cache.get(url)
+        if cached and time.time() - cached[2] < AVATAR_CACHE_TTL:
+            content, content_type, _ = cached
+            response = HttpResponse(content, content_type=content_type)
+            response["Content-Length"] = len(content)
+            response["Cache-Control"] = "public, max-age=86400, immutable"
+            return response
+
     failed_at = _proxy_fail_cache.get(url)
     if failed_at and time.time() - failed_at < PROXY_FAIL_TTL:
         return HttpResponse(status=502)
@@ -484,7 +507,6 @@ def proxy(request):
         "Referer": "https://www.instagram.com/" if is_instagram_cdn else "https://x.com/",
     }
 
-    range_header = request.META.get("HTTP_RANGE")
     if range_header:
         headers["Range"] = range_header
 
@@ -503,6 +525,9 @@ def proxy(request):
 
     content = upstream.content
     content_type = upstream.headers.get("Content-Type", "application/octet-stream")
+
+    if cacheable and upstream.status_code == 200:
+        _avatar_cache[url] = (content, content_type, time.time())
 
     response = HttpResponse(
         content,

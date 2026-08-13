@@ -164,7 +164,7 @@ export function SourceList() {
         <div className="h-[env(safe-area-inset-top)]" />
         <div className="flex items-center justify-between px-4 py-3">
           <h2 className="text-lg font-semibold">Sources</h2>
-          <AddSourceDialog onAdded={() => mutate()} />
+          <AddSourceDialog onAdded={() => mutate()} defaultType={topTab} />
         </div>
 
         <div className="px-4 pb-2">
