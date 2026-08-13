@@ -75,6 +75,7 @@ class Item(models.Model):
             "replyCount": self.reply_count,
             "sourceName": src.name if src else None,
             "sourceIcon": src.icon_url if src else None,
+            "sourceType": src.type if src else None,
         }
 
 

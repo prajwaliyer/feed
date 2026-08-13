@@ -5,23 +5,43 @@ interface AddSourceDialogProps {
   onAdded: () => void;
 }
 
+type SourceType = "twitter_user" | "instagram_story";
+
+const HANDLE_RULES: Record<SourceType, { label: string; placeholder: string; pattern: RegExp; error: string }> = {
+  twitter_user: {
+    label: "Twitter Handle",
+    placeholder: "@elonmusk",
+    pattern: /^[a-zA-Z0-9_]{1,15}$/,
+    error: "Invalid Twitter handle",
+  },
+  instagram_story: {
+    label: "Instagram Username",
+    placeholder: "username",
+    pattern: /^[a-zA-Z0-9._]{1,30}$/,
+    error: "Invalid Instagram username",
+  },
+};
+
 export function AddSourceDialog({ onAdded }: AddSourceDialogProps) {
   const [open, setOpen] = useState(false);
+  const [sourceType, setSourceType] = useState<SourceType>("twitter_user");
   const [handle, setHandle] = useState("");
   const [multiplier, setMultiplier] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const rules = HANDLE_RULES[sourceType];
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const clean = handle.trim().replace(/^@/, "");
 
     if (!clean) {
-      setError("Please enter a Twitter handle");
+      setError(`Please enter ${sourceType === "twitter_user" ? "a Twitter handle" : "an Instagram username"}`);
       return;
     }
-    if (!/^[a-zA-Z0-9_]{1,15}$/.test(clean)) {
-      setError("Invalid Twitter handle");
+    if (!rules.pattern.test(clean)) {
+      setError(rules.error);
       return;
     }
 
@@ -34,6 +54,7 @@ export function AddSourceDialog({ onAdded }: AddSourceDialogProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           handle: clean,
+          type: sourceType,
           ...(multiplier && !isNaN(parseFloat(multiplier)) ? { customMultiplier: parseFloat(multiplier) } : {}),
         }),
       });
@@ -66,20 +87,41 @@ export function AddSourceDialog({ onAdded }: AddSourceDialogProps) {
         createPortal(
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80" onClick={() => setOpen(false)}>
             <div className="w-full max-w-md rounded-lg border border-border bg-background p-6 shadow-lg" onClick={(e) => e.stopPropagation()}>
-              <h3 className="text-lg font-semibold">Add Twitter Account</h3>
+              <h3 className="text-lg font-semibold">Add Account</h3>
+              <div className="mt-4 flex gap-1.5">
+                {(["twitter_user", "instagram_story"] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => { setSourceType(t); setError(""); }}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                      sourceType === t
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    {t === "twitter_user" ? "Twitter" : "Instagram Story"}
+                  </button>
+                ))}
+              </div>
               <form onSubmit={handleSubmit} className="mt-4 space-y-4">
                 <div className="space-y-2">
                   <label htmlFor="handle" className="text-sm font-medium">
-                    Twitter Handle
+                    {rules.label}
                   </label>
                   <input
                     id="handle"
-                    placeholder="@elonmusk"
+                    placeholder={rules.placeholder}
                     value={handle}
                     onChange={(e) => setHandle(e.target.value)}
                     autoFocus
                     className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   />
+                  {sourceType === "instagram_story" && (
+                    <p className="text-xs text-muted-foreground">
+                      Your fetch account must already follow this account for stories to show up.
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <label htmlFor="multiplier" className="text-sm font-medium">

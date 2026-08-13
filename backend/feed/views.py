@@ -1,6 +1,7 @@
 import json
 import re
 import statistics
+import time
 from datetime import timedelta
 
 import requests as http_requests
@@ -50,7 +51,11 @@ def items_list(request):
     starred = request.GET.get("starred")
     min_ratio = request.GET.get("minRatio")
 
-    qs = Item.objects.select_related("source").order_by("-published_at")
+    qs = (
+        Item.objects.select_related("source")
+        .exclude(guid__startswith="instagram_story_")
+        .order_by("-published_at")
+    )
 
     if cursor:
         qs = qs.filter(published_at__lt=cursor)
@@ -64,6 +69,11 @@ def items_list(request):
         medians = _get_source_median_scores()
 
         def passes_filter(item):
+            # Instagram posts aren't ranked by engagement - show all of them
+            # (already capped to the last 2 days by fetcher.POST_RETENTION).
+            if item.guid.startswith("instagram_post_"):
+                return True
+
             median = medians.get(item.source_id, 1)
             score = _engagement_score(item.like_count, item.reply_count)
             multiplier = item.source.custom_multiplier
@@ -146,6 +156,95 @@ def item_detail(request, item_id):
     return JsonResponse(item.to_dict())
 
 
+# --- Stories ---
+
+# Instagram stories expire after 24h; their media URLs go dead around then, so
+# only surface stories published inside this window in the bubble bar.
+STORY_TTL = timedelta(hours=24)
+
+_STORY_VIDEO_SRC_RE = re.compile(r'<video[^>]*\bsrc="([^"]+)"')
+_STORY_VIDEO_POSTER_RE = re.compile(r'<video[^>]*\bposter="([^"]+)"')
+
+
+def _story_item_to_dict(item):
+    """Turn a stored instagram_story Item into a viewer-friendly dict.
+
+    The fetcher stores the media as an HTML snippet in `content`
+    (<video ... src=.. poster=..> or <img src=..>), so we parse it back out
+    here rather than adding columns to the model.
+    """
+    content = item.content or ""
+    video_match = _STORY_VIDEO_SRC_RE.search(content)
+    if video_match:
+        poster_match = _STORY_VIDEO_POSTER_RE.search(content)
+        return {
+            "id": item.id,
+            "type": "video",
+            "videoUrl": video_match.group(1),
+            "imageUrl": poster_match.group(1) if poster_match else item.image_url,
+            "url": item.url,
+            "isRead": item.is_read,
+            "publishedAt": item.published_at.isoformat() if item.published_at else None,
+        }
+    return {
+        "id": item.id,
+        "type": "image",
+        "videoUrl": None,
+        "imageUrl": item.image_url,
+        "url": item.url,
+        "isRead": item.is_read,
+        "publishedAt": item.published_at.isoformat() if item.published_at else None,
+    }
+
+
+@require_GET
+def stories(request):
+    """Active Instagram stories grouped by source, for the bubble bar/viewer.
+
+    Groups are ordered so accounts with unseen stories come first (like
+    Instagram), then by most recent. Items within a group play oldest first.
+    """
+    cutoff = timezone.now() - STORY_TTL
+    items = (
+        Item.objects.select_related("source")
+        .filter(
+            source__type="instagram_story",
+            guid__startswith="instagram_story_",
+            published_at__gte=cutoff,
+        )
+        .order_by("published_at")
+    )
+
+    groups = {}
+    for item in items:
+        src = item.source
+        group = groups.get(src.id)
+        if group is None:
+            group = {
+                "sourceId": src.id,
+                "sourceName": src.name,
+                "sourceIcon": src.icon_url,
+                "items": [],
+                "latest": item.published_at,
+                "hasUnseen": False,
+            }
+            groups[src.id] = group
+        group["items"].append(_story_item_to_dict(item))
+        if item.published_at and item.published_at > group["latest"]:
+            group["latest"] = item.published_at
+        if not item.is_read:
+            group["hasUnseen"] = True
+
+    ordered = sorted(
+        groups.values(),
+        key=lambda g: (not g["hasUnseen"], -g["latest"].timestamp() if g["latest"] else 0),
+    )
+    for g in ordered:
+        g.pop("latest", None)
+
+    return JsonResponse({"groups": ordered})
+
+
 # --- Sources ---
 
 
@@ -181,10 +280,21 @@ def sources_view(request):
 
         source_type = body.get("type", "twitter_user")
         name = body.get("name") or handle
+        custom_multiplier = body.get("customMultiplier")
+
+        if source_type == "instagram_story":
+            source = Source.objects.create(
+                type=source_type,
+                name=name,
+                url=f"https://www.instagram.com/{handle}/",
+                icon_url=f"https://unavatar.io/instagram/{handle}",
+                custom_multiplier=str(custom_multiplier) if custom_multiplier is not None else None,
+            )
+            return JsonResponse(source.to_dict(), status=201)
+
         url = _build_rsshub_url(handle)
         followers = _fetch_follower_count(handle)
 
-        custom_multiplier = body.get("customMultiplier")
         source = Source.objects.create(
             type=source_type,
             name=name,
@@ -286,6 +396,28 @@ ALLOWED_HOSTS = [
     "abs.twimg.com",
 ]
 
+# Instagram CDN hostnames are dynamic per-region/edge (e.g.
+# scontent-iad3-1.cdninstagram.com, instagram.fdel1-1.fna.fbcdn.net),
+# so these are matched by suffix rather than an exact list.
+ALLOWED_HOST_SUFFIXES = [
+    ".cdninstagram.com",
+    ".fna.fbcdn.net",
+]
+
+
+def _host_allowed(hostname):
+    if hostname in ALLOWED_HOSTS:
+        return True
+    return any(hostname.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES) if hostname else False
+
+
+# Instagram CDN links for expired sessions/stories can hang instead of
+# failing fast, and every <img> re-requests the same dead URL on every page
+# load. Remember recent failures briefly so repeats fail instantly instead
+# of re-waiting on the full timeout.
+_proxy_fail_cache = {}
+PROXY_FAIL_TTL = 300  # seconds
+
 
 @require_GET
 def proxy(request):
@@ -299,12 +431,17 @@ def proxy(request):
     except Exception:
         return JsonResponse({"error": "invalid url"}, status=400)
 
-    if parsed.hostname not in ALLOWED_HOSTS:
+    if not _host_allowed(parsed.hostname):
         return JsonResponse({"error": "host not allowed"}, status=403)
 
+    failed_at = _proxy_fail_cache.get(url)
+    if failed_at and time.time() - failed_at < PROXY_FAIL_TTL:
+        return HttpResponse(status=502)
+
+    is_instagram_cdn = any(parsed.hostname.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES)
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Referer": "https://x.com/",
+        "Referer": "https://www.instagram.com/" if is_instagram_cdn else "https://x.com/",
     }
 
     range_header = request.META.get("HTTP_RANGE")
@@ -312,11 +449,16 @@ def proxy(request):
         headers["Range"] = range_header
 
     try:
-        upstream = http_requests.get(url, headers=headers, timeout=15, stream=True)
+        # (connect, read) timeouts - short, since a healthy CDN responds in
+        # well under a second; a hung/broken link should fail fast rather
+        # than hold the request (and the frontend's fallback UI) for 15s.
+        upstream = http_requests.get(url, headers=headers, timeout=(4, 6), stream=True)
     except Exception:
+        _proxy_fail_cache[url] = time.time()
         return JsonResponse({"error": "fetch failed"}, status=502)
 
     if upstream.status_code not in (200, 206):
+        _proxy_fail_cache[url] = time.time()
         return HttpResponse(status=upstream.status_code)
 
     content = upstream.content

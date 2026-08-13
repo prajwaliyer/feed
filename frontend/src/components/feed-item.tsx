@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { FeedItem } from "@/hooks/use-feed";
+import { Avatar } from "./avatar";
 
 const URL_REGEX = /(https?:\/\/[^\s<]+)/g;
 
@@ -162,6 +163,47 @@ function extractVideos(html: string): { src: string; poster?: string }[] {
 
 function proxyUrl(url: string): string {
   return `/api/proxy?url=${encodeURIComponent(url)}`;
+}
+
+function SourcePlatformBadge({ sourceType }: { sourceType: string | null }) {
+  if (sourceType?.startsWith("twitter")) {
+    return (
+      <span
+        className="flex h-4 w-4 items-center justify-center rounded-full bg-black"
+        title="Twitter"
+      >
+        <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="white">
+          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+        </svg>
+      </span>
+    );
+  }
+  if (sourceType?.startsWith("instagram")) {
+    return (
+      <span
+        className="flex h-4 w-4 items-center justify-center rounded-full bg-gradient-to-tr from-yellow-400 via-pink-500 to-purple-600"
+        title="Instagram"
+      >
+        <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={2}>
+          <rect x="3" y="3" width="18" height="18" rx="5" />
+          <circle cx="12" cy="12" r="4" />
+          <circle cx="17.5" cy="6.5" r="0.75" fill="white" stroke="none" />
+        </svg>
+      </span>
+    );
+  }
+  return (
+    <span
+      className="flex h-4 w-4 items-center justify-center rounded-full bg-muted-foreground"
+      title="Other"
+    >
+      <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth={2}>
+        <circle cx="12" cy="12" r="10" />
+        <line x1="2" y1="12" x2="22" y2="12" />
+        <path d="M12 2a15.3 15.3 0 0 1 0 20 15.3 15.3 0 0 1 0-20z" />
+      </svg>
+    </span>
+  );
 }
 
 function LoadingImage(props: React.ImgHTMLAttributes<HTMLImageElement>) {
@@ -785,35 +827,16 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
       <div className="flex gap-3">
         {/* Avatar */}
         <div className="shrink-0 cursor-pointer" onClick={() => setShowSourceSettings(true)}>
-          {item.sourceIcon ? (
-            <img
-              src={proxyUrl(item.sourceIcon)}
-              alt=""
-              className="h-10 w-10 rounded-full bg-muted"
-              loading="lazy"
-            />
-          ) : (
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-sm font-bold">
-              {(item.author || "?")[0].toUpperCase()}
-            </div>
-          )}
+          <Avatar
+            src={item.sourceIcon}
+            name={item.author}
+            className="h-10 w-10 rounded-full"
+            fallbackClassName="text-sm"
+          />
         </div>
 
         {/* Content */}
         <div className="min-w-0 flex-1">
-          {/* Repost indicator */}
-          {retweetAuthor && (
-            <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path d="m2 9 3-3 3 3" />
-                <path d="M13 18H7a2 2 0 0 1-2-2V6" />
-                <path d="m22 15-3 3-3-3" />
-                <path d="M11 6h6a2 2 0 0 1 2 2v10" />
-              </svg>
-              <span className="truncate">{item.author || item.sourceName} reposted</span>
-            </div>
-          )}
-
           {/* Header */}
           <div className="flex items-center gap-1.5">
             <span className="truncate font-semibold text-sm">
@@ -826,7 +849,23 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
             <span className="shrink-0 text-xs text-muted-foreground">
               {item.publishedAt ? timeAgo(item.publishedAt) : ""}
             </span>
+            <span className="ml-auto shrink-0">
+              <SourcePlatformBadge sourceType={item.sourceType} />
+            </span>
           </div>
+
+          {/* Repost indicator */}
+          {retweetAuthor && (
+            <div className="mt-0.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path d="m2 9 3-3 3 3" />
+                <path d="M13 18H7a2 2 0 0 1-2-2V6" />
+                <path d="m22 15-3 3-3-3" />
+                <path d="M11 6h6a2 2 0 0 1 2 2v10" />
+              </svg>
+              <span className="truncate">{item.author || item.sourceName} reposted</span>
+            </div>
+          )}
 
           {retweetAuthor ? (
             /* Reposted content, nested like a real retweet card */

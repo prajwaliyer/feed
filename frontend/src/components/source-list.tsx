@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import useSWR from "swr";
 import { AddSourceDialog } from "./add-source-dialog";
+import { Avatar } from "./avatar";
 
 interface Source {
   id: number;
@@ -16,7 +17,7 @@ interface Source {
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
-type TopTab = "twitter_user" | "other";
+type TopTab = "twitter_user" | "instagram_story";
 
 function OverflowMenu({
   source,
@@ -143,9 +144,9 @@ export function SourceList() {
   };
 
   const twitterSources = sources?.filter((s) => s.type === "twitter_user") ?? [];
-  const otherSources = sources?.filter((s) => s.type !== "twitter_user") ?? [];
+  const instagramSources = sources?.filter((s) => s.type === "instagram_story") ?? [];
 
-  const byTab = topTab === "other" ? otherSources : twitterSources;
+  const byTab = topTab === "instagram_story" ? instagramSources : twitterSources;
 
   const sorted = [...byTab].sort((a, b) => {
     const aMultiplier = a.customMultiplier ? parseFloat(a.customMultiplier) : 1;
@@ -177,7 +178,7 @@ export function SourceList() {
         </div>
 
         <div className="flex gap-1.5 px-4 pb-2">
-          {(["twitter_user", "other"] as const).map((tab) => (
+          {(["twitter_user", "instagram_story"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setTopTab(tab)}
@@ -187,7 +188,7 @@ export function SourceList() {
                   : "bg-muted text-muted-foreground"
               }`}
             >
-              {tab === "twitter_user" ? "Twitter" : "Other"}
+              {tab === "twitter_user" ? "Twitter" : "Instagram"}
             </button>
           ))}
         </div>
@@ -201,10 +202,10 @@ export function SourceList() {
       ) : filtered.length === 0 ? (
         <div className="px-4 py-20 text-center text-muted-foreground">
           <p className="text-lg font-medium">
-            {topTab === "other" ? "No other sources yet" : "No Twitter accounts yet"}
+            {topTab === "instagram_story" ? "No Instagram accounts yet" : "No Twitter accounts yet"}
           </p>
           <p className="mt-1 text-sm">
-            Add a Twitter account to get started
+            {topTab === "instagram_story" ? "Add an Instagram account to get started" : "Add a Twitter account to get started"}
           </p>
         </div>
       ) : (
@@ -214,18 +215,12 @@ export function SourceList() {
               key={source.id}
               className="flex items-center gap-3 border-b border-border px-4 py-3"
             >
-              {source.iconUrl ? (
-                <img
-                  src={`/api/proxy?url=${encodeURIComponent(source.iconUrl)}`}
-                  alt=""
-                  className="h-10 w-10 rounded-full bg-muted"
-                  loading="lazy"
-                />
-              ) : (
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-sm font-bold">
-                  {source.name[0].toUpperCase()}
-                </div>
-              )}
+              <Avatar
+                src={source.iconUrl}
+                name={source.name}
+                className="h-10 w-10 rounded-full"
+                fallbackClassName="text-sm"
+              />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
                   <p className="font-medium text-sm truncate">@{source.name}</p>

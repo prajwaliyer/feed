@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useFeed } from "@/hooks/use-feed";
 import { FeedItemCard } from "./feed-item";
+import { StoriesBar } from "./stories-bar";
 
 type FeedTab = "foryou" | "all";
 
@@ -163,6 +164,8 @@ export function FeedList({ starred }: FeedListProps) {
           />
         </div>
       </div>
+
+      {!starred && <StoriesBar />}
 
       {items.length === 0 ? (
         <div className="px-4 py-20 text-center text-muted-foreground">
