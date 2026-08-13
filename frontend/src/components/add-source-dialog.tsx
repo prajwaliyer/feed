@@ -17,7 +17,7 @@ const HANDLE_RULES: Record<SourceType, { label: string; placeholder: string; pat
   },
   instagram_story: {
     label: "Instagram Username",
-    placeholder: "username",
+    placeholder: "cristiano",
     pattern: /^[a-zA-Z0-9._]{1,30}$/,
     error: "Invalid Instagram username",
   },
