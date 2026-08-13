@@ -1,9 +1,12 @@
+import ipaddress
 import json
 import re
+import socket
 import statistics
+import threading
 import time
 from datetime import timedelta
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 import requests as http_requests
@@ -13,6 +16,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
+from . import tts
 from .auth import COOKIE_NAME, MAX_AGE, make_auth_token
 from .models import Item, Source
 
@@ -162,6 +166,90 @@ def item_detail(request, item_id):
 
     item.save()
     return JsonResponse(item.to_dict())
+
+
+# --- Audio narration (Piper TTS) ---
+
+_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+
+# A long article can take a couple minutes to synthesize on CPU. Holding a
+# single HTTP request open that whole time is fragile - it has to survive
+# nginx's proxy timeout AND Cloudflare's edge timeout for phone access via
+# feed.prajwaliyer.com. So generation runs in a background thread instead;
+# the frontend kicks it off then polls a cheap status endpoint, and every
+# individual request stays fast regardless of how long synthesis takes.
+_generation_lock = threading.Lock()
+_generation_status = {}  # item_id -> "generating" | "error"
+
+
+def _generate_in_background(item_id):
+    try:
+        item = Item.objects.get(id=item_id)
+        tts.synthesize_and_cache(item)
+        with _generation_lock:
+            _generation_status.pop(item_id, None)
+    except Exception as e:
+        print(f"[tts] Failed to generate audio for item {item_id}: {e}")
+        with _generation_lock:
+            _generation_status[item_id] = "error"
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def item_audio_generate(request, item_id):
+    if tts.audio_path(item_id).exists():
+        return JsonResponse({"status": "ready"})
+
+    with _generation_lock:
+        if _generation_status.get(item_id) == "generating":
+            return JsonResponse({"status": "generating"})
+        _generation_status[item_id] = "generating"
+
+    if not Item.objects.filter(id=item_id).exists():
+        with _generation_lock:
+            _generation_status.pop(item_id, None)
+        return JsonResponse({"error": "not found"}, status=404)
+
+    threading.Thread(target=_generate_in_background, args=(item_id,), daemon=True).start()
+    return JsonResponse({"status": "generating"}, status=202)
+
+
+@require_GET
+def item_audio_status(request, item_id):
+    if tts.audio_path(item_id).exists():
+        return JsonResponse({"status": "ready"})
+    with _generation_lock:
+        status = _generation_status.get(item_id)
+    return JsonResponse({"status": status or "idle"})
+
+
+@require_GET
+def item_audio(request, item_id):
+    path = tts.audio_path(item_id)
+    if not path.exists():
+        return JsonResponse({"error": "not generated"}, status=404)
+
+    file_size = path.stat().st_size
+    range_header = request.META.get("HTTP_RANGE", "")
+    range_match = _RANGE_RE.match(range_header)
+
+    if range_match:
+        start = int(range_match.group(1)) if range_match.group(1) else 0
+        end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+        end = min(end, file_size - 1)
+        with open(path, "rb") as f:
+            f.seek(start)
+            chunk = f.read(end - start + 1)
+        response = HttpResponse(chunk, status=206, content_type="audio/mpeg")
+        response["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        response["Content-Length"] = str(len(chunk))
+    else:
+        response = HttpResponse(path.read_bytes(), content_type="audio/mpeg")
+        response["Content-Length"] = str(file_size)
+
+    response["Accept-Ranges"] = "bytes"
+    response["Cache-Control"] = "public, max-age=86400, immutable"
+    return response
 
 
 # --- Stories ---
@@ -481,10 +569,38 @@ ALLOWED_HOST_SUFFIXES = [
 ]
 
 
+def _is_public_host(hostname):
+    """Resolve hostname and reject anything pointing at a private/internal
+    address, so the proxy can't be used to reach the homelab's internal
+    network via an attacker-controlled RSS feed's image URLs."""
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
 def _host_allowed(hostname):
+    if not hostname:
+        return False
     if hostname in ALLOWED_HOSTS:
         return True
-    return any(hostname.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES) if hostname else False
+    if any(hostname.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES):
+        return True
+    # RSS article images come from arbitrary publisher domains, so fall back
+    # to allowing any host that doesn't resolve to an internal address.
+    return _is_public_host(hostname)
 
 
 # Instagram CDN links for expired sessions/stories can hang instead of
@@ -513,12 +629,11 @@ def proxy(request):
         return JsonResponse({"error": "url required"}, status=400)
 
     try:
-        from urllib.parse import urlparse
         parsed = urlparse(url)
     except Exception:
         return JsonResponse({"error": "invalid url"}, status=400)
 
-    if not _host_allowed(parsed.hostname):
+    if parsed.scheme not in ("http", "https") or not _host_allowed(parsed.hostname):
         return JsonResponse({"error": "host not allowed"}, status=403)
 
     range_header = request.META.get("HTTP_RANGE")
@@ -538,10 +653,14 @@ def proxy(request):
         return HttpResponse(status=502)
 
     is_instagram_cdn = any(parsed.hostname.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES)
+    is_twitter_cdn = parsed.hostname in ALLOWED_HOSTS
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Referer": "https://www.instagram.com/" if is_instagram_cdn else "https://x.com/",
     }
+    if is_instagram_cdn:
+        headers["Referer"] = "https://www.instagram.com/"
+    elif is_twitter_cdn:
+        headers["Referer"] = "https://x.com/"
 
     if range_header:
         headers["Range"] = range_header
@@ -550,7 +669,27 @@ def proxy(request):
         # (connect, read) timeouts - short, since a healthy CDN responds in
         # well under a second; a hung/broken link should fail fast rather
         # than hold the request (and the frontend's fallback UI) for 15s.
-        upstream = http_requests.get(url, headers=headers, timeout=(4, 6), stream=True)
+        # Redirects are followed manually (rather than via allow_redirects)
+        # so each hop's host is re-checked - otherwise a redirect could be
+        # used to bypass the private-network check above.
+        next_url = url
+        upstream = None
+        for _ in range(5):
+            hop = urlparse(next_url)
+            if hop.scheme not in ("http", "https") or not _host_allowed(hop.hostname):
+                _proxy_fail_cache[url] = time.time()
+                return JsonResponse({"error": "host not allowed"}, status=403)
+            resp = http_requests.get(
+                next_url, headers=headers, timeout=(4, 6), stream=True, allow_redirects=False
+            )
+            if resp.is_redirect and resp.headers.get("Location"):
+                next_url = urljoin(next_url, resp.headers["Location"])
+                continue
+            upstream = resp
+            break
+        if upstream is None:
+            _proxy_fail_cache[url] = time.time()
+            return JsonResponse({"error": "too many redirects"}, status=502)
     except Exception:
         _proxy_fail_cache[url] = time.time()
         return JsonResponse({"error": "fetch failed"}, status=502)

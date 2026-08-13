@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { SiInstagram, SiRss, SiX } from "react-icons/si";
 import type { FeedItem } from "@/hooks/use-feed";
 import { Avatar } from "./avatar";
+import { ArticleReader } from "./article-reader";
 
 const URL_REGEX = /(https?:\/\/[^\s<]+)/g;
 
@@ -94,14 +95,15 @@ function LinkPreview({ url }: { url: string }) {
   );
 }
 
-function RssCard({ title, imageUrl, url }: { title: string | null; imageUrl: string | null; url: string | null }) {
+function RssCard({ title, imageUrl, onOpen }: { title: string | null; imageUrl: string | null; onOpen: () => void }) {
   return (
-    <a
-      href={url ?? undefined}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="mt-1.5 flex items-center gap-3 rounded-lg border border-border p-2 hover:bg-muted transition-colors"
-      onClick={(e) => e.stopPropagation()}
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen();
+      }}
+      className="mt-1.5 flex w-full items-center gap-3 rounded-lg border border-border p-2 text-left hover:bg-muted transition-colors"
     >
       {imageUrl && (
         <LoadingImage
@@ -114,7 +116,7 @@ function RssCard({ title, imageUrl, url }: { title: string | null; imageUrl: str
       <p className="min-w-0 flex-1 text-sm font-medium leading-snug line-clamp-3">
         {title}
       </p>
-    </a>
+    </button>
   );
 }
 
@@ -813,11 +815,13 @@ interface FeedItemCardProps {
 
 export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCardProps) {
   const [showSourceSettings, setShowSourceSettings] = useState(false);
+  const [showReader, setShowReader] = useState(false);
   const { mainText, mainImages, mainVideos, retweetAuthor, quote } = parseContent(item.content);
   const displayText = mainText || item.title?.replace(RETWEET_TITLE_PREFIX_REGEX, "") || "";
 
   return (
     <article className="border-b border-border px-4 py-3">
+      {showReader && <ArticleReader item={item} onClose={() => setShowReader(false)} />}
       {showSourceSettings && (
         <SourceSettingsDialog
           sourceId={item.sourceId}
@@ -871,7 +875,7 @@ export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCa
           )}
 
           {item.sourceType === "rss" ? (
-            <RssCard title={item.title} imageUrl={item.imageUrl} url={item.url} />
+            <RssCard title={item.title} imageUrl={item.imageUrl} onOpen={() => setShowReader(true)} />
           ) : retweetAuthor ? (
             /* Reposted content, nested like a real retweet card */
             <div className="mt-1.5 rounded-lg border border-border p-3">

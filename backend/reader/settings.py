@@ -47,3 +47,4 @@ USE_TZ = True
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 RSSHUB_BASE_URL = os.environ.get("RSSHUB_BASE_URL", "http://localhost:1200")
+TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://localhost:5000")

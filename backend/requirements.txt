@@ -3,3 +3,4 @@ django-cors-headers>=4.0
 requests>=2.31
 feedparser>=6.0
 instaloader>=4.14
+beautifulsoup4>=4.12
