@@ -129,7 +129,7 @@ export function FeedList({ starred }: FeedListProps) {
         <div className="pt-2" />
 
         {!starred && (
-          <div className="flex gap-1.5 px-4 pb-2 overflow-x-auto">
+          <div className="flex items-center gap-1.5 px-4 pb-2 overflow-x-auto">
             {FEED_TABS.map((tab) => (
               <button
                 key={tab.value}
@@ -143,6 +143,15 @@ export function FeedList({ starred }: FeedListProps) {
                 {tab.label}
               </button>
             ))}
+            <button
+              onClick={async () => {
+                await fetch("/api/logout", { method: "POST" });
+                window.location.reload();
+              }}
+              className="ml-auto shrink-0 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Log out
+            </button>
           </div>
         )}
 

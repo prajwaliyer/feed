@@ -11,6 +11,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
+from .auth import COOKIE_NAME, MAX_AGE, make_auth_token
 from .models import Item, Source
 
 PAGE_SIZE = 20
@@ -362,6 +363,45 @@ def last_fetch(request):
 def set_last_fetch_time(ts):
     global _last_fetch_time
     _last_fetch_time = ts
+
+
+# --- Auth ---
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def login(request):
+    body = json.loads(request.body)
+    username = body.get("username", "")
+    password = body.get("password", "")
+
+    if username != settings.AUTH_USERNAME or password != settings.AUTH_PASSWORD:
+        return JsonResponse({"error": "Invalid username or password"}, status=401)
+
+    response = JsonResponse({"ok": True})
+    response.set_cookie(
+        COOKIE_NAME,
+        make_auth_token(),
+        max_age=MAX_AGE,
+        httponly=True,
+        samesite="Lax",
+    )
+    return response
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def logout(request):
+    response = JsonResponse({"ok": True})
+    response.delete_cookie(COOKIE_NAME)
+    return response
+
+
+@require_GET
+def auth_check(request):
+    # LoginRequiredMiddleware already rejects unauthenticated requests before
+    # this runs, so simply reaching here means the cookie is valid.
+    return JsonResponse({"ok": True})
 
 
 # --- Health ---
