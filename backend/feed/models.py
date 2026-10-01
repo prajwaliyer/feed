@@ -54,6 +54,11 @@ class Item(models.Model):
         indexes = [
             models.Index(fields=["source"]),
             models.Index(fields=["-published_at"]),
+            # The feed is served in this order now, and the scroll cursor pages
+            # through it - without the index every page load sorts the whole
+            # table. Rowids are the tiebreak (see items_list), which is also the
+            # order SQLite stores index entries in, so no sort is needed at all.
+            models.Index(fields=["-fetched_at"]),
             models.Index(fields=["is_starred"]),
         ]
 

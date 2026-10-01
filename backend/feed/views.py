@@ -58,14 +58,25 @@ def items_list(request):
     starred = request.GET.get("starred")
     min_ratio = request.GET.get("minRatio")
 
+    # Newest-fetched first, NOT newest-published. Each fetch pulls an account's
+    # last ~20 posts and stores whichever ones we don't have yet, so a post
+    # published at 09:50 can arrive in the 10:05 pass, behind posts published at
+    # 10:00 that are already on screen. Ordering by publish time buries it there
+    # permanently, under things the reader has scrolled past; ordering by fetch
+    # time keeps everything that arrived since the last look at the top, at the
+    # cost of the feed no longer being a strict timeline. `-id` is a tiebreak
+    # (one pass inserts many items) and gives the ordering a total order, so
+    # paging can't skip or repeat on a tie.
     qs = (
         Item.objects.select_related("source")
         .exclude(guid__startswith="instagram_story_")
-        .order_by("-published_at")
+        .order_by("-fetched_at", "-id")
     )
 
+    # Cursor on the same column the ordering uses - keying it off published_at
+    # would page through a different sequence than the one being rendered.
     if cursor:
-        qs = qs.filter(published_at__lt=cursor)
+        qs = qs.filter(fetched_at__lt=cursor)
     if source_id:
         qs = qs.filter(source_id=int(source_id))
     if starred == "true":
@@ -129,7 +140,7 @@ def items_list(request):
 
     has_more = len(results) > PAGE_SIZE and not exhausted
     data = results[:PAGE_SIZE]
-    next_cursor = data[-1].published_at.isoformat() if has_more and data else None
+    next_cursor = data[-1].fetched_at.isoformat() if has_more and data else None
 
     medians = _get_source_median_scores()
     items_out = []

@@ -1,3 +1,5 @@
+import json
+import os
 import re
 import time
 from datetime import timedelta
@@ -5,14 +7,87 @@ from datetime import timedelta
 import feedparser
 import requests
 from django.conf import settings
+from django.db.models import F
 from django.utils import timezone
 
 from . import instagram
-from .models import Item, Source
+from .models import Item, Setting, Source
 
 RSS_BATCH_SIZE = 5
 ENGAGEMENT_BATCH_SIZE = 10
-SOURCE_COOLDOWN_S = 25 * 60
+
+# The "is this source due?" filter. It must stay BELOW the interval passed to
+# `manage.py fetchfeeds`, because the shortest gap between two passes for a
+# given source is exactly that interval - a source fetched at the end of pass N
+# with pass N+1 starting `interval` seconds later. Set it higher and the tail of
+# every pass silently drops out of the next one. It used to be 25 min pressed
+# against a 30 min sleep, which guaranteed every source was due on every pass;
+# that is what pinned the same accounts into starvation instead of rotating
+# which ones missed out.
+SOURCE_COOLDOWN_S = 30
+
+# Every twitter_user source is served by RSSHub, which fetches them all using a
+# pool of Twitter auth tokens. Twitter rate-limits the timeline endpoint per
+# token and RSSHub reacts by locking that token for ~2000s. Firing all ~99
+# sources back-to-back burned the whole per-window budget in about 40 seconds,
+# so the lock always landed at the same point in the cycle and the same ~37
+# accounts came back empty every time. Spacing the requests out keeps each
+# window's burst inside the budget so the lock never trips in the first place.
+#
+# RSSHub's locks are per-token (`twitter:lock-token1:<token>`) and it rotates
+# the pool round-robin, so N tokens buy N times the budget and the safe spacing
+# drops to 25/N. Derived from the pool rather than hardcoded, so adding an
+# account to TWITTER_AUTH_TOKEN retunes this automatically instead of leaving a
+# stale number behind. Floored at 3s because RSSHub caches timelines for
+# CACHE_EXPIRE=300 - any faster and it just re-reads cache. An explicit
+# RSSHUB_MIN_INTERVAL_S in the environment still wins.
+_RSSHUB_BASE_INTERVAL_S = 25
+_RSSHUB_MIN_INTERVAL_FLOOR_S = 3
+
+
+def _twitter_token_count():
+    """How many distinct tokens RSSHub has to rotate over (never below 1)."""
+    raw = os.environ.get("TWITTER_AUTH_TOKEN", "")
+    return max(len([t for t in raw.split(",") if t.strip()]), 1)
+
+
+def _rsshub_min_interval_s():
+    override = os.environ.get("RSSHUB_MIN_INTERVAL_S")
+    if override:
+        return int(override)
+    return max(
+        _RSSHUB_MIN_INTERVAL_FLOOR_S,
+        _RSSHUB_BASE_INTERVAL_S // _twitter_token_count(),
+    )
+
+
+RSSHUB_MIN_INTERVAL_S = _rsshub_min_interval_s()
+
+# An empty feed from RSSHub means the token is locked, not that the account has
+# no posts. Each such request costs ~45s of retry spinning inside RSSHub, so
+# after a few in a row, stop asking and let the remaining sources lead the next
+# cycle instead of burning the whole cycle on requests that cannot succeed.
+RSSHUB_LOCK_THRESHOLD = 3
+
+# Sources are served oldest-fetch-first, so anything that gets deferred (or
+# starved) moves to the front of the next cycle rather than waiting behind the
+# same wall forever. Kept in the DB because the in-memory map resets on restart.
+LAST_ATTEMPT_KEY = "source_last_attempt"
+
+# Instagram's web_profile_info endpoint has been rate-limiting us (429) on
+# every fetch at the default cadence, so poll it much less often.
+INSTAGRAM_COOLDOWN_S = 2 * 60 * 60
+
+# Firing all due Instagram sources back-to-back in one cycle looks bursty to
+# Instagram and gets the whole session 429'd, so space them out too.
+INSTAGRAM_SOURCE_DELAY_S = 30
+
+# The session has been 429'd solid since 2026-08-13, including after waiting
+# a month and after routing through a NordVPN exit IP via gluetun (still
+# 429'd instantly) - so this is an account-level block on the session, not
+# an IP rate limit. Nothing short of a long cooldown or a new account fixes
+# that. Paused for a month from 2026-08-18 to let it clear.
+INSTAGRAM_PAUSED_UNTIL = timezone.datetime(2026, 9, 18, 0, 0, tzinfo=timezone.utc)
 
 # Instagram story media URLs stop resolving once the story expires (~24h),
 # so there's no point keeping the items around much past that.
@@ -69,18 +144,65 @@ def update_engagement():
             )
 
 
+def _place_backfilled_history(backfilling, created_ids):
+    """Put a source's first-ever fetch where its posts belong in time.
+
+    The first time we store anything for a source, everything it returns is
+    history rather than news - RSSHub hands over the account's last ~20 posts,
+    an RSS feed its last 10-50 entries. Stamped with `now`, that history becomes
+    a solid block at the top of the feed (a full page per source, because a
+    source's items are inserted back to back and so get consecutive fetch
+    times), and the real timeline is pushed off the first pages. That is exactly
+    what happened the day the starved accounts started delivering again: 304
+    items, 15 pages of week-old catch-up, sitting above everything current.
+
+    So a first-ever fetch keeps its published position, and only genuinely new
+    posts from a source we already know about count as news and go to the top on
+    fetch time. This also means adding an account no longer floods the feed with
+    its back-catalogue.
+
+    Bulk UPDATE rather than setting the column at insert time because
+    `fetched_at` is `auto_now_add`, which overwrites whatever is passed in.
+    """
+    if not (backfilling and created_ids):
+        return
+    # published_at is nullable; copying NULL into a NOT NULL column would fail.
+    Item.objects.filter(pk__in=created_ids, published_at__isnull=False).update(
+        fetched_at=F("published_at")
+    )
+
+
 def _fetch_rss_source(source, results):
+    """Fetch one RSS-backed source. Returns "ok", "empty" or "error".
+
+    "empty" is the interesting one: RSSHub answers HTTP 200 with a perfectly
+    valid feed wrapper and zero <item>s when its Twitter token is unavailable
+    (the route sets allowEmpty), so it looks exactly like a success that simply
+    had no new posts. Without this check the whole starvation was invisible.
+    """
     try:
         feed = feedparser.parse(source.url)
         if feed.bozo and not feed.entries:
             status = feed.get("status", "?")
             print(f"[fetch] Error fetching {source.name}: status={status} bozo={feed.bozo_exception}")
             results["errors"] += 1
-            return
+            return "error"
     except Exception as e:
         print(f"[fetch] Exception fetching {source.name}: {e}")
         results["errors"] += 1
-        return
+        return "error"
+
+    if not feed.entries:
+        print(f"[fetch] Empty feed for {source.name} ({source.url}) - source is publishing nothing")
+        results["errors"] += 1
+        results["empty"] += 1
+        return "empty"
+
+    # Read up front: the moment the first item is stored this source stops
+    # being "new", and every later item in this same fetch would be treated as
+    # news and pushed to the top instead of being backfilled with it.
+    backfilling = not Item.objects.filter(source_id=source.id).exists()
+    created_ids = []
 
     for entry in feed.entries:
         guid = getattr(entry, "id", None) or getattr(entry, "link", None) or getattr(entry, "title", "")
@@ -107,7 +229,7 @@ def _fetch_rss_source(source, results):
             )
 
         try:
-            Item.objects.get_or_create(
+            obj, created = Item.objects.get_or_create(
                 guid=guid,
                 defaults={
                     "source": source,
@@ -120,9 +242,15 @@ def _fetch_rss_source(source, results):
                     "fetched_at": timezone.now(),
                 },
             )
-            results["fetched"] += 1
+            # Only genuinely new items, so the log line means something.
+            if created:
+                results["fetched"] += 1
+                created_ids.append(obj.pk)
         except Exception:
             pass
+
+    _place_backfilled_history(backfilling, created_ids)
+    return "ok"
 
 
 def _fetch_instagram_source(source, results):
@@ -137,9 +265,13 @@ def _fetch_instagram_source(source, results):
         results["errors"] += 1
         return
 
+    # Same first-ever-fetch rule as the RSS path.
+    backfilling = not Item.objects.filter(source_id=source.id).exists()
+    created_ids = []
+
     for data in content_items:
         try:
-            Item.objects.get_or_create(
+            obj, created = Item.objects.get_or_create(
                 guid=data["guid"],
                 defaults={
                     "source": source,
@@ -154,37 +286,127 @@ def _fetch_instagram_source(source, results):
                     "reply_count": data.get("reply_count"),
                 },
             )
-            results["fetched"] += 1
+            # Only genuinely new items - this used to count every entry handed
+            # back, already-stored ones included, so the run log overstated it.
+            if created:
+                results["fetched"] += 1
+                created_ids.append(obj.pk)
         except Exception:
             pass
+
+    _place_backfilled_history(backfilling, created_ids)
+
+
+def _is_twitter_source(source):
+    """Sources served by RSSHub's twitter route, which share one token budget."""
+    return source.type == "twitter_user" or "/twitter/" in (source.url or "")
+
+
+def _load_last_attempts():
+    try:
+        return json.loads(Setting.objects.get(key=LAST_ATTEMPT_KEY).value)
+    except (Setting.DoesNotExist, ValueError):
+        pass
+
+    # Nothing stored yet (first run after this change, or a fresh DB). Seed from
+    # when each source last actually produced an item, so the accounts that have
+    # been starved the longest lead the very first cycle instead of waiting.
+    from django.db.models import Max
+
+    seeded = {}
+    for row in Item.objects.values("source_id").annotate(last=Max("fetched_at")):
+        if row["last"]:
+            seeded[str(row["source_id"])] = row["last"].timestamp()
+    return seeded
+
+
+def _save_last_attempts(attempts):
+    try:
+        Setting.objects.update_or_create(
+            key=LAST_ATTEMPT_KEY, defaults={"value": json.dumps(attempts)}
+        )
+    except Exception as e:
+        print(f"[fetch] Could not persist last-attempt times: {e}")
 
 
 def fetch_all_feeds():
     from .views import set_last_fetch_time
 
     all_sources = list(Source.objects.all())
-    results = {"fetched": 0, "errors": 0, "skipped": 0}
+    results = {"fetched": 0, "errors": 0, "skipped": 0, "empty": 0}
+
+    instagram_paused = timezone.now() < INSTAGRAM_PAUSED_UNTIL
 
     now = time.time()
     due_sources = [
         s
         for s in all_sources
-        if now - _last_source_fetch.get(s.id, 0) >= SOURCE_COOLDOWN_S
+        if not (instagram_paused and s.type == "instagram_story")
+        and now - _last_source_fetch.get(s.id, 0)
+        >= (INSTAGRAM_COOLDOWN_S if s.type == "instagram_story" else SOURCE_COOLDOWN_S)
     ]
+
+    # Oldest-fetch-first. A source that gets deferred or starved this cycle leads
+    # the next one, so a bad window rotates which accounts miss out instead of
+    # pinning the same ones forever.
+    attempts = _load_last_attempts()
+    due_sources.sort(key=lambda s: attempts.get(str(s.id), 0))
 
     print(
         f"[fetch] Starting fetch for {len(due_sources)}/{len(all_sources)} sources "
-        f"({len(all_sources) - len(due_sources)} in cooldown)..."
+        f"({len(all_sources) - len(due_sources)} in cooldown), "
+        f"twitter pacing {RSSHUB_MIN_INTERVAL_S}s over "
+        f"{_twitter_token_count()} token(s)..."
     )
+    if instagram_paused:
+        print(f"[fetch] Instagram paused until {INSTAGRAM_PAUSED_UNTIL.isoformat()}")
+
+    fetched_instagram = False
+    last_rsshub_request = 0.0
+    rsshub_empty_streak = 0
+    rsshub_down = False
 
     for source in due_sources:
         if source.type == "instagram_story":
+            if fetched_instagram:
+                time.sleep(INSTAGRAM_SOURCE_DELAY_S)
             _fetch_instagram_source(source, results)
+            fetched_instagram = True
+        elif _is_twitter_source(source):
+            if rsshub_down:
+                # The token is locked, so every request would burn ~45s in
+                # RSSHub's retry loop and still come back empty. Leave these
+                # sources due (and oldest-first) so they lead the next cycle.
+                results["skipped"] += 1
+                continue
+            gap = time.time() - last_rsshub_request
+            if gap < RSSHUB_MIN_INTERVAL_S:
+                time.sleep(RSSHUB_MIN_INTERVAL_S - gap)
+            last_rsshub_request = time.time()
+            status = _fetch_rss_source(source, results)
+            if status == "empty":
+                rsshub_empty_streak += 1
+                if rsshub_empty_streak >= RSSHUB_LOCK_THRESHOLD:
+                    print(
+                        f"[fetch] {rsshub_empty_streak} empty twitter feeds in a row - RSSHub "
+                        "token is rate-limited/locked, deferring the rest of this cycle"
+                    )
+                    rsshub_down = True
+            else:
+                rsshub_empty_streak = 0
         else:
             _fetch_rss_source(source, results)
-        _last_source_fetch[source.id] = time.time()
 
-    print(f"[fetch] Done ({results['fetched']} new, {results['errors']} errors)")
+        _last_source_fetch[source.id] = time.time()
+        attempts[str(source.id)] = time.time()
+
+    if results["skipped"]:
+        print(f"[fetch] Deferred {results['skipped']} RSSHub sources; they lead the next cycle")
+
+    print(
+        f"[fetch] Done ({results['fetched']} new, {results['errors']} errors, "
+        f"{results['empty']} empty)"
+    )
 
     update_engagement()
 
