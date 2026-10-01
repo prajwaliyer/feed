@@ -7,7 +7,7 @@ from datetime import timedelta
 import feedparser
 import requests
 from django.conf import settings
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from . import instagram
@@ -97,6 +97,36 @@ STORY_RETENTION = timedelta(hours=48)
 # window is the only thing capping how far back they're visible.
 POST_RETENTION = timedelta(days=2)
 
+# --- Engagement sampling ---
+#
+# Likes and replies come from Twitter's syndication endpoint, which serves
+# current numbers for a tweet. Reading each item once, minutes after it arrived,
+# froze its score at whatever it had at a minute old - so anything that took off
+# hours later was ranked as a flop forever and could never reach the For You
+# feed. Recent items are re-sampled on a rolling window instead.
+ENGAGEMENT_WINDOW = timedelta(hours=48)
+
+# How long one sample stands before it is read again. Short enough to notice a
+# post taking off, long enough to stay cheap: the window holds ~1700 items, so
+# at 2h each pass re-reads roughly 660 of them rather than all 1700.
+ENGAGEMENT_STALENESS = timedelta(hours=2)
+
+# Ceiling on reads per pass, so a cold start (every item unsampled) can't stretch
+# the pass past the interval it runs on.
+ENGAGEMENT_BATCH = 800
+
+# The bar the For You feed ranks against - the frontend sends minRatio=3 - applied
+# server-side to decide what has earned a trip back to the top.
+PROMOTE_RATIO = 3.0
+
+# Only promote items that have already drifted down: anything on the first page
+# is visible anyway, and re-stamping it would churn positions for nothing.
+PROMOTE_MIN_AGE = timedelta(hours=6)
+
+# Cap per pass, so a burst of qualifying posts can't slam a solid block onto the
+# top of the feed. Highest ratio wins when more than this qualify.
+PROMOTE_BATCH = 25
+
 _last_source_fetch = {}
 
 
@@ -124,24 +154,89 @@ def _fetch_engagement(tweet_id):
     return None
 
 
+def _promote_blooming(now):
+    """Float posts that crossed the For You bar late back to the top, once.
+
+    Re-sampling counts fixes a late bloomer's *score*, but the feed is ordered by
+    position stamp and an item's stamp is fixed when it arrives - so on its own
+    that just re-scores a post sitting on page 15, where nobody sees it. Clearing
+    the bar earns one trip back to the top. `promoted_at` makes it one-shot: the
+    age gate alone would let the same post be promoted again every 6h, pinning it
+    to the top for as long as the engagement holds.
+    """
+    from .views import _engagement_score, _get_source_median_scores
+
+    medians = _get_source_median_scores()
+    candidates = (
+        Item.objects.filter(
+            promoted_at__isnull=True,
+            like_count__isnull=False,
+            fetched_at__lt=now - PROMOTE_MIN_AGE,
+            published_at__gte=now - ENGAGEMENT_WINDOW,
+        )
+        .exclude(source__type="instagram_story")
+        .select_related("source")
+    )
+
+    scored = []
+    for item in candidates:
+        boost = float(item.source.custom_multiplier or 1)
+        # Muted sources stay muted. A 10x source already bypasses the For You
+        # filter - every post of its is on show regardless of score - so promoting
+        # would only shove its older posts above newer ones from the same account.
+        if boost <= 0 or boost >= 10:
+            continue
+        median = medians.get(item.source_id, 1)
+        ratio = _engagement_score(item.like_count, item.reply_count) / median
+        if ratio >= PROMOTE_RATIO:
+            scored.append((ratio, item.id))
+
+    if not scored:
+        return
+
+    scored.sort(reverse=True)
+    ids = [item_id for _, item_id in scored[:PROMOTE_BATCH]]
+    Item.objects.filter(id__in=ids).update(fetched_at=now, promoted_at=now)
+    print(
+        f"[fetch] Promoted {len(ids)} late-blooming post(s) to the top "
+        f"({len(scored)} cleared the bar)"
+    )
+
+
 def update_engagement():
-    pending = Item.objects.filter(like_count__isnull=True).exclude(
-        source__type="instagram_story"
-    ).values_list("id", "url")
+    now = timezone.now()
+
+    # Recent items whose counts are missing or past their staleness window,
+    # stalest first - so the samples most out of date are the ones refreshed.
+    pending = list(
+        Item.objects.filter(published_at__gte=now - ENGAGEMENT_WINDOW)
+        .exclude(source__type="instagram_story")
+        .filter(
+            Q(engagement_checked_at__isnull=True)
+            | Q(engagement_checked_at__lt=now - ENGAGEMENT_STALENESS)
+        )
+        .order_by("engagement_checked_at", "id")
+        .values_list("id", "url")[:ENGAGEMENT_BATCH]
+    )
     if not pending:
         return
 
-    print(f"[fetch] Fetching engagement for {len(pending)} items...")
+    print(f"[fetch] Sampling engagement for {len(pending)} items...")
 
     for item_id, url in pending:
         tweet_id = _extract_tweet_id(url)
-        if not tweet_id:
-            continue
-        eng = _fetch_engagement(tweet_id)
+        eng = _fetch_engagement(tweet_id) if tweet_id else None
+        # Stamp every item looked at, not just the ones that yielded numbers.
+        # RSS and Instagram items have no tweet id and would otherwise stay
+        # permanently unsampled, refilling the batch every pass so that nothing
+        # else ever got refreshed.
+        fields = {"engagement_checked_at": timezone.now()}
         if eng:
-            Item.objects.filter(id=item_id).update(
-                like_count=eng["likes"], reply_count=eng["replies"]
-            )
+            fields["like_count"] = eng["likes"]
+            fields["reply_count"] = eng["replies"]
+        Item.objects.filter(id=item_id).update(**fields)
+
+    _promote_blooming(now)
 
 
 def _place_backfilled_history(backfilling, created_ids):

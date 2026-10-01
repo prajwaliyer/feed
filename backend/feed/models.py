@@ -43,11 +43,24 @@ class Item(models.Model):
     author = models.CharField(max_length=255, blank=True, null=True)
     image_url = models.URLField(max_length=500, blank=True, null=True)
     published_at = models.DateTimeField(blank=True, null=True)
+    # Not strictly "when it arrived" any more - the fetcher also rewrites this to
+    # pull an item back up to the top (first-ever-fetch backfill, and promoting a
+    # post that became popular hours after it landed). It is really "when this
+    # item took its current position in the feed".
     fetched_at = models.DateTimeField(auto_now_add=True)
     is_read = models.BooleanField(default=False)
     is_starred = models.BooleanField(default=False)
     like_count = models.IntegerField(blank=True, null=True)
     reply_count = models.IntegerField(blank=True, null=True)
+    # Engagement used to be sampled once, minutes after arrival, and then frozen -
+    # so a post that only took off hours later kept the near-zero count it had on
+    # day one and could never qualify for the For You feed. This tracks when the
+    # counts were last read so recent items can be re-sampled.
+    engagement_checked_at = models.DateTimeField(blank=True, null=True)
+    # Set once, when an item is floated back to the top because its engagement
+    # crossed the For You bar late. Guards against re-promoting it every pass
+    # forever, which would pin it to the top for good.
+    promoted_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
         db_table = "feed_item"

@@ -27,12 +27,30 @@ REPLY_WEIGHT = 27
 # In-memory tracking (same as the Node version)
 _last_fetch_time = None
 
+# The medians are computed from every scored item in the table - 135k rows at the
+# time of writing, ~290ms of a ~295ms page load - and they only move when the
+# fetcher re-samples engagement, which happens at most once per pass. Recomputing
+# them per request bought nothing and dominated the response time.
+_MEDIAN_TTL_S = 300
+_median_cache = {"computed_at": 0.0, "medians": {}}
+_median_lock = threading.Lock()
+
 
 def _engagement_score(likes, replies):
     return (likes or 0) * LIKE_WEIGHT + (replies or 0) * REPLY_WEIGHT
 
 
 def _get_source_median_scores():
+    now = time.time()
+    with _median_lock:
+        if (
+            _median_cache["medians"]
+            and now - _median_cache["computed_at"] < _MEDIAN_TTL_S
+        ):
+            return _median_cache["medians"]
+
+    # Deliberately outside the lock: two requests racing here just compute the
+    # same answer twice, which is cheaper than serialising every page load.
     items = Item.objects.filter(like_count__isnull=False).values_list(
         "source_id", "like_count", "reply_count"
     )
@@ -45,6 +63,10 @@ def _get_source_median_scores():
     for source_id, scores in grouped.items():
         median = statistics.median(scores) if scores else 1
         medians[source_id] = max(median, 1)
+
+    with _median_lock:
+        _median_cache["computed_at"] = now
+        _median_cache["medians"] = medians
     return medians
 
 
