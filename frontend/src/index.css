@@ -206,6 +206,10 @@
   border: 1px solid var(--border);
 }
 
+.article-content img {
+  cursor: pointer;
+}
+
 .article-content blockquote {
   border-left: 3px solid var(--border);
   padding-left: 1em;

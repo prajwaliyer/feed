@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import DOMPurify from "dompurify";
 import type { FeedItem } from "@/hooks/use-feed";
 import { Avatar } from "./avatar";
+import { ImageLightbox } from "./image-lightbox";
 
 function proxyUrl(url: string): string {
   return `/api/proxy?url=${encodeURIComponent(url)}`;
@@ -11,7 +12,16 @@ function proxyUrl(url: string): string {
 // Feed content is untrusted external HTML - sanitize before rendering, and
 // route images through our proxy (source sites often block hotlinking/CORS)
 // while forcing links to open in a new tab like the rest of the app.
-function sanitizeArticleHtml(html: string): string {
+//
+// Many CMSes (Substack in particular) wrap each image in an <a target="_blank">
+// pointing at the full-size file, with their own "view fullscreen" icon button
+// sitting next to the <img>. That icon is dead weight once we strip their JS,
+// and the wrapper is why images used to navigate to a bare image URL instead of
+// opening in our own lightbox. If the anchor contains nothing but the image
+// (no caption text), unwrap it entirely so only the <img> remains - dropping
+// the icon buttons along with it - and let the click handler in ArticleReader
+// open our lightbox instead.
+function sanitizeArticleHtml(html: string): { html: string; images: string[] } {
   const clean = DOMPurify.sanitize(html, {
     ADD_ATTR: ["target"],
     FORBID_TAGS: ["style", "script", "iframe", "form"],
@@ -20,19 +30,29 @@ function sanitizeArticleHtml(html: string): string {
   const container = document.createElement("div");
   container.innerHTML = clean;
 
+  container.querySelectorAll("a").forEach((a) => {
+    const media = a.querySelector("img");
+    if (media && !a.textContent?.trim()) {
+      a.replaceWith(media);
+    } else {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    }
+  });
+
+  const images: string[] = [];
   container.querySelectorAll("img").forEach((img) => {
     const src = img.getAttribute("src");
-    if (src) img.setAttribute("src", proxyUrl(src));
+    if (src) {
+      const proxied = proxyUrl(src);
+      img.setAttribute("src", proxied);
+      images.push(proxied);
+    }
     img.removeAttribute("srcset");
     img.setAttribute("loading", "lazy");
   });
 
-  container.querySelectorAll("a").forEach((a) => {
-    a.setAttribute("target", "_blank");
-    a.setAttribute("rel", "noopener noreferrer");
-  });
-
-  return container.innerHTML;
+  return { html: container.innerHTML, images };
 }
 
 // Narration audio is generated server-side (Piper TTS) and cached per item,
@@ -92,6 +112,7 @@ function formatDate(dateStr: string): string {
 
 export function ArticleReader({ item, onClose }: { item: FeedItem; onClose: () => void }) {
   const [audioState, setAudioState] = useState<AudioState>("idle");
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
@@ -179,7 +200,11 @@ export function ArticleReader({ item, onClose }: { item: FeedItem; onClose: () =
     }
   };
 
-  const html = item.content ? sanitizeArticleHtml(item.content) : "";
+  const { html, images: contentImages } = item.content
+    ? sanitizeArticleHtml(item.content)
+    : { html: "", images: [] as string[] };
+  const headerImage = item.imageUrl ? proxyUrl(item.imageUrl) : null;
+  const lightboxImages = headerImage ? [headerImage, ...contentImages] : contentImages;
 
   return createPortal(
     <div className="fixed inset-0 z-50 overflow-y-auto bg-background">
@@ -249,20 +274,40 @@ export function ArticleReader({ item, onClose }: { item: FeedItem; onClose: () =
           {item.publishedAt && <span>{formatDate(item.publishedAt)}</span>}
         </div>
 
-        {item.imageUrl && (
+        {headerImage && (
           <img
-            src={proxyUrl(item.imageUrl)}
+            src={headerImage}
             alt=""
-            className="mt-4 w-full rounded-lg border border-border object-cover"
+            className="mt-4 w-full cursor-pointer rounded-lg border border-border object-cover"
+            onClick={() => setLightboxIndex(0)}
           />
         )}
 
         {html ? (
-          <div className="article-content mt-5" dangerouslySetInnerHTML={{ __html: html }} />
+          <div
+            className="article-content mt-5"
+            dangerouslySetInnerHTML={{ __html: html }}
+            onClick={(e) => {
+              const target = e.target as HTMLElement;
+              if (target.tagName !== "IMG") return;
+              const idx = lightboxImages.indexOf(target.getAttribute("src") ?? "");
+              if (idx !== -1) {
+                e.preventDefault();
+                setLightboxIndex(idx);
+              }
+            }}
+          />
         ) : (
           <p className="mt-5 text-sm text-muted-foreground">No content available for this article.</p>
         )}
       </div>
+      {lightboxIndex !== null && (
+        <ImageLightbox
+          images={lightboxImages}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />
+      )}
     </div>,
     document.body
   );
