@@ -129,14 +129,19 @@ def items_list(request):
                 return False
             effective_ratio = ratio / boost
 
-            followers = item.source.follower_count or 0
-            if 0 < followers < 1000:
-                effective_ratio *= 0.6
-            elif followers < 10000:
-                effective_ratio *= 0.8
-            elif followers < 100000:
-                effective_ratio *= 0.9
-
+            # Small accounts used to get the bar cut by up to 40%, which does
+            # nothing useful here: dividing by the account's own median already
+            # removes its scale, so a 500-follower account's hit (500 likes over
+            # a median of 20) clears the bar on its own merits, and the discount
+            # only let its mediocre posts through where a large account's would
+            # have been filtered. It wasn't comparing accounts - For You is a
+            # per-item yes/no test with no cross-account ranking for a small
+            # account to lose. On this feed it was also close to inert: 80 of 99
+            # sources are 100k+ and got no discount at all.
+            #
+            # The freshness nudge below does earn its place - a post that is 20
+            # minutes old has had less time to collect engagement, so its score
+            # is genuinely understated in a way its follower count is not.
             if item.published_at:
                 age = timezone.now() - item.published_at
                 if age < timedelta(hours=1):
