@@ -61,6 +61,15 @@ class Item(models.Model):
     # crossed the For You bar late. Guards against re-promoting it every pass
     # forever, which would pin it to the top for good.
     promoted_at = models.DateTimeField(blank=True, null=True)
+    # Whether the item was already clearing the For You bar at its first
+    # engagement sample - i.e. it was on show while it was still new, so the
+    # reader could already have scrolled past it. For You is scored from live
+    # counts, so a post can sit in the feed for hours and only then reach the
+    # higher bar promotion tests; floating that one back over the top re-shows
+    # the reader something they have seen. Records what the item looked like,
+    # not what the reader did - nothing tracks impressions. See
+    # fetcher._promote_blooming.
+    for_you_at_arrival = models.BooleanField(default=False)
 
     class Meta:
         db_table = "feed_item"

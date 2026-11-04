@@ -24,6 +24,13 @@ PAGE_SIZE = 20
 LIKE_WEIGHT = 1
 REPLY_WEIGHT = 27
 
+# What the frontend sends as minRatio while the For You tab is up. Written down
+# here rather than restated in the fetcher because both have to apply the same
+# test: the fetcher's promotion gate asks whether an item would have been on
+# show when it arrived, and answering that with a different bar than the
+# reader's is how a post they already scrolled past gets floated back to the top.
+FOR_YOU_RATIO = 3.0
+
 # In-memory tracking (same as the Node version)
 _last_fetch_time = None
 
@@ -38,6 +45,44 @@ _median_lock = threading.Lock()
 
 def _engagement_score(likes, replies):
     return (likes or 0) * LIKE_WEIGHT + (replies or 0) * REPLY_WEIGHT
+
+
+def _passes_for_you(
+    guid, source_type, boost, published_at, score, median, now, ratio=FOR_YOU_RATIO
+):
+    """Would an item with these numbers appear in For You right now?
+
+    The one place the For You test is written down. items_list calls it per item
+    on the way out, with whatever minRatio the request asked for; the fetcher
+    calls it once per item as counts first arrive, to record whether the post
+    was already on show while it was new.
+    """
+    # Instagram posts aren't ranked by engagement - show all of them
+    # (already capped to the last 2 days by fetcher.POST_RETENTION).
+    if guid.startswith("instagram_post_"):
+        return True
+    # RSS items never get like/reply counts (those only come from the Twitter
+    # syndication API), so they'd always score 0 and vanish from "For You" -
+    # show them unfiltered instead.
+    if source_type == "rss":
+        return True
+
+    # A 10x source bypasses the filter - every post of its is on show whatever
+    # it scores. A muted source is the mirror of that.
+    if boost >= 10:
+        return True
+    if boost <= 0:
+        return False
+
+    effective_ratio = ratio / boost
+    # A post that is 20 minutes old has had less time to collect engagement, so
+    # its score is genuinely understated in a way its follower count is not.
+    if published_at:
+        age = now - published_at
+        if age < timedelta(hours=1):
+            effective_ratio *= 0.5
+
+    return score / median >= effective_ratio
 
 
 def _get_source_median_scores():
@@ -107,47 +152,29 @@ def items_list(request):
     if min_ratio:
         ratio = float(min_ratio)
         medians = _get_source_median_scores()
+        now = timezone.now()
 
+        # Small accounts used to get the bar cut by up to 40%, which does
+        # nothing useful here: dividing by the account's own median already
+        # removes its scale, so a 500-follower account's hit (500 likes over a
+        # median of 20) clears the bar on its own merits, and the discount only
+        # let its mediocre posts through where a large account's identical post
+        # was filtered. It wasn't comparing accounts - For You is a per-item
+        # yes/no test with no cross-account ranking for a small account to lose.
+        # On this feed it was also close to inert: 80 of 99 sources are 100k+
+        # and got no discount at all.
         def passes_filter(item):
-            # Instagram posts aren't ranked by engagement - show all of them
-            # (already capped to the last 2 days by fetcher.POST_RETENTION).
-            if item.guid.startswith("instagram_post_"):
-                return True
-            # RSS items never get like/reply counts (those only come from the
-            # Twitter syndication API), so they'd always score 0 and vanish
-            # from "For You" - show them unfiltered instead.
-            if item.source.type == "rss":
-                return True
-
-            median = medians.get(item.source_id, 1)
-            score = _engagement_score(item.like_count, item.reply_count)
             multiplier = item.source.custom_multiplier
-            boost = float(multiplier) if multiplier else 1
-            if boost >= 10:
-                return True
-            if boost <= 0:
-                return False
-            effective_ratio = ratio / boost
-
-            # Small accounts used to get the bar cut by up to 40%, which does
-            # nothing useful here: dividing by the account's own median already
-            # removes its scale, so a 500-follower account's hit (500 likes over
-            # a median of 20) clears the bar on its own merits, and the discount
-            # only let its mediocre posts through where a large account's would
-            # have been filtered. It wasn't comparing accounts - For You is a
-            # per-item yes/no test with no cross-account ranking for a small
-            # account to lose. On this feed it was also close to inert: 80 of 99
-            # sources are 100k+ and got no discount at all.
-            #
-            # The freshness nudge below does earn its place - a post that is 20
-            # minutes old has had less time to collect engagement, so its score
-            # is genuinely understated in a way its follower count is not.
-            if item.published_at:
-                age = timezone.now() - item.published_at
-                if age < timedelta(hours=1):
-                    effective_ratio *= 0.5
-
-            return score / median >= effective_ratio
+            return _passes_for_you(
+                item.guid,
+                item.source.type,
+                float(multiplier) if multiplier else 1,
+                item.published_at,
+                _engagement_score(item.like_count, item.reply_count),
+                medians.get(item.source_id, 1),
+                now,
+                ratio=ratio,
+            )
 
         results = []
         batch_size = PAGE_SIZE * 5
